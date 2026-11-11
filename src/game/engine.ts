@@ -5,6 +5,7 @@ import { Team, getTeam, randomOpponent } from './teams';
 import { renderAll } from './render';
 
 export const FIELD_HALF_W = 26.65;
+const REGULATION_HALF_SECONDS = 5 * 60;
 
 export type Phase = 'boot' | 'presnap' | 'fourth' | 'play' | 'kick' | 'conv' | 'banner' | 'over';
 export type Play = 'qb' | 'air' | 'run' | 'dead';
@@ -122,6 +123,7 @@ export interface TackleAnim {
 export interface EngineCallbacks {
   onPause: (paused: boolean) => void;
   onOver: (stats: FinalStats) => void;
+  onOnlineInput?: (input: any) => void;
 }
 
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
@@ -306,8 +308,12 @@ export class GameEngine {
   endY = 0;
 
   // --- online sync ---
-  isRemote = false;       // if true, we are the guest just rendering the host's state
+  onlineRole: 'host' | 'guest' | null = null;
+  onlineEnabled = false;
+  isRemote = false;
   remoteState: any = null;
+  onlineGuestKeys: Record<string, boolean> = {};
+  onlineDefenderId = -1;
 
   stats = freshStats();
   crowd: { s: number; y: number; c: number }[] = [];
@@ -341,6 +347,127 @@ export class GameEngine {
     this.resize();
     for (let i = 0; i < 460; i++) {
       this.crowd.push({ s: i % 2, y: Math.random(), c: Math.floor(Math.random() * 6) });
+    }
+  }
+
+  setOnlineRole(role: 'host' | 'guest' | null) {
+    this.onlineRole = role;
+    this.onlineEnabled = role !== null;
+    this.isRemote = role === 'guest';
+    this.remoteState = null;
+    this.onlineGuestKeys = {};
+    this.onlineDefenderId = -1;
+  }
+
+  applyOnlineInput(raw: any) {
+    if (!this.onlineEnabled || this.onlineRole !== 'host' || !raw) return;
+
+    const input =
+      raw.input && typeof raw.input === 'object'
+        ? raw.input
+        : raw;
+
+    if (input.type === 'key') {
+      const key = String(input.key ?? '').toLowerCase();
+      if (!key) return;
+
+      const down = Boolean(input.down);
+      const wasDown = Boolean(this.onlineGuestKeys[key]);
+      this.onlineGuestKeys[key] = down;
+
+      // Only perform one-shot actions on the initial keydown.
+      if (!down || wasDown || this.paused) return;
+
+      if (this.phase === 'banner') {
+        if (
+          (key === 'space' || key === 'enter') &&
+          this.banner &&
+          this.banner.t > 0.5
+        ) {
+          this.bannerDone();
+        }
+        return;
+      }
+
+      // Host has the ball; guest controls a defender.
+      if (this.cur2P === 0) {
+        if (key === 'q' || key === '[') this.selectOnlineDefender(-1);
+        else if (key === 'e' || key === ']') this.selectOnlineDefender(1);
+        else if (key === 'space') this.diveOnlineDefender();
+        return;
+      }
+
+      // Guest has the ball.
+      if (this.phase === 'presnap') {
+        if (key === 'q' || key === '[') this.changeSeasonPlay(-1);
+        else if (key === 'e' || key === ']') this.changeSeasonPlay(1);
+        else if (key === 'space' || key === 'enter') this.snap();
+        return;
+      }
+
+      if (this.phase === 'fourth') {
+        if (key === 'enter' || key === 'g') this.fourthGo();
+        else if (key === 'p') this.punt();
+        else if (key === 'f') this.tryFieldGoal();
+        return;
+      }
+
+      if (this.phase === 'kick' && (key === 'space' || key === 'k' || key === 'enter')) {
+        this.kickStop();
+        return;
+      }
+
+      if (this.phase === 'conv') {
+        this.pickConv(key);
+        return;
+      }
+
+      if (this.phase === 'play' && this.play === 'qb') {
+        const slot = Number.parseInt(key, 10);
+        if (slot >= 1 && slot <= 6) this.throwToSlot(slot);
+        else if (key === 'space' || key === 'e') this.startScramble();
+      }
+
+      return;
+    }
+
+    if (input.type === 'action') {
+      const action = String(input.action ?? '');
+
+      if (
+        action === 'banner' &&
+        this.phase === 'banner' &&
+        this.banner &&
+        this.banner.t > 0.5
+      ) {
+        this.bannerDone();
+      } else if (action === 'snap' && this.cur2P === 1) {
+        this.snap();
+      } else if (action === 'kick' && this.cur2P === 1) {
+        this.kickStop();
+      }
+
+      return;
+    }
+
+    if (
+      input.type === 'throw' &&
+      this.cur2P === 1 &&
+      this.phase === 'play' &&
+      this.play === 'qb'
+    ) {
+      const tx = Number(input.tx);
+      const ty = Number(input.ty);
+      if (!Number.isFinite(tx) || !Number.isFinite(ty)) return;
+
+      const wrId = Number(input.wrId);
+      const receiver = Number.isInteger(wrId)
+        ? this.players.find((p) => p.id === wrId && p.kind === 'wr')
+        : undefined;
+
+      const power = Number(input.power);
+      this.aim.power = Number.isFinite(power) ? clamp(power, 0, 1) : 0.6;
+      this.throwAt(tx, ty, receiver);
     }
   }
 
@@ -429,7 +556,9 @@ export class GameEngine {
     this.cur2P = 0;
     this.possIdx = 0;
     this.half = 1;
-    this.clock = this.cfg.halfLen;
+    this.clock = this.cfg.clocked
+      ? REGULATION_HALF_SECONDS
+      : this.cfg.halfLen;
     this.down = 1;
     this.los = Math.floor(rand(20, 30));
     this.ltg = this.los + 10;
@@ -510,13 +639,103 @@ export class GameEngine {
 
   /** the team currently on offense */
   offTeam(): Team {
+    if (this.onlineEnabled) {
+      return this.cur2P === 0 ? this.team : this.team2;
+    }
     if (this.cfg.id === 'two2') return this.cur2P === 0 ? this.team : this.team2;
     return this.team;
   }
   defTeam(): Team {
+    if (this.onlineEnabled) {
+      return this.cur2P === 0 ? this.team2 : this.team;
+    }
     if (this.cfg.id === 'two2') return this.cur2P === 0 ? this.team2 : this.team;
     return this.opp;
   }
+
+  private keysForPlayer(p: PlayerEnt | null): Record<string, boolean> {
+    if (this.onlineEnabled && p?.pad === 1) return this.onlineGuestKeys;
+    return this.keys;
+  }
+
+  private selectOnlineDefender(dir: number) {
+    if (!this.onlineEnabled || this.cfg.drill) return;
+
+    const candidates = this.players.filter(
+      (p) =>
+        p.side === 'def' &&
+        p.state !== 'down' &&
+        p.state !== 'tackled' &&
+        p.state !== 'whiff',
+    );
+
+    if (!candidates.length) return;
+
+    const oldIndex = candidates.findIndex(
+      (p) => p.id === this.onlineDefenderId,
+    );
+
+    const nextIndex =
+      oldIndex < 0
+        ? dir >= 0
+          ? 0
+          : candidates.length - 1
+        : (oldIndex + dir + candidates.length) % candidates.length;
+
+    for (const p of this.players) {
+      if (p.side === 'def') p.ctrl = false;
+    }
+
+    const selected = candidates[nextIndex];
+    selected.ctrl = true;
+
+    // Host offense means the guest controls defense, and vice versa.
+    selected.pad = this.cur2P === 0 ? 1 : 0;
+    this.onlineDefenderId = selected.id;
+  }
+
+  private diveOnlineDefender() {
+    if (
+      !this.onlineEnabled ||
+      this.cfg.drill ||
+      this.phase !== 'play' ||
+      this.play !== 'run'
+    ) {
+      return;
+    }
+
+    const defender = this.players.find(
+      (p) => p.id === this.onlineDefenderId,
+    );
+    const carrier = this.carrier();
+
+    if (
+      !defender ||
+      !carrier ||
+      defender.stun > 0 ||
+      defender.diveT > 0 ||
+      defender.state === 'down' ||
+      defender.state === 'dive' ||
+      defender.state === 'tackling' ||
+      carrier.state === 'tackled'
+    ) {
+      return;
+    }
+
+    const angle = Math.atan2(
+      carrier.y + carrier.vy * 0.1 - defender.y,
+      carrier.x + carrier.vx * 0.1 - defender.x,
+    );
+
+    defender.state = 'dive';
+    defender.diveT = 0.5;
+    defender.anim = 'dive';
+    defender.animT = 0;
+    defender.vx = Math.cos(angle) * 13;
+    defender.vy = Math.sin(angle) * 13;
+    defender.face = angle;
+  }
+
   /** 0.9 - 1.1 speed scalar from a rating */
   private ratingMul(r: number) { return 0.9 + ((r - 55) / 44) * 0.2; }
 
@@ -624,6 +843,23 @@ export class GameEngine {
       const lead = Math.max(0, this.scoreUs - this.scoreThem);
       const rb = 1 + Math.min(0.1, lead * 0.004) + (this.half - 1) * 0.03;
       for (const p of this.players) if (p.side === 'def') { p.speed *= rb; p.chaseSpeed *= Math.min(rb, 1.08); }
+    }
+
+    if (this.onlineEnabled && !c.drill) {
+      this.onlineGuestKeys = {};
+
+      // Guest-controlled offense uses guest inputs for its QB and carrier.
+      for (const p of this.players) {
+        if (p.side === 'off') p.pad = this.cur2P === 1 ? 1 : 0;
+      }
+
+      const onlineQb = this.players[this.qbId];
+      if (this.cur2P === 1 && onlineQb) onlineQb.ctrl = true;
+
+      this.onlineDefenderId = -1;
+      this.selectOnlineDefender(1);
+    } else {
+      this.onlineDefenderId = -1;
     }
 
     this.ball.state = 'held';
@@ -826,7 +1062,11 @@ export class GameEngine {
   }
 
   private sprintingFor(p: PlayerEnt): boolean {
-    if (!this.sprinting) return false;
+    const sprinting = this.onlineEnabled
+      ? Boolean(this.keysForPlayer(p)['shift'])
+      : this.sprinting;
+
+    if (!sprinting) return false;
     return p.isCarrier && p.pad <= 0 && !this.cfg.drill;
   }
 
@@ -939,9 +1179,44 @@ export class GameEngine {
     audio.ensure();
     if (this.paused || this.destroyed) return;
     const [bx, by] = this.toBuf(e.clientX, e.clientY);
-    for (const b of this.ui) {
-      if (bx >= b.x && bx <= b.x + b.w && by >= b.y && by <= b.y + b.h) { audio.uiClick(); b.cb(); return; }
+
+    const onlineGuest = this.onlineEnabled && this.onlineRole === 'guest';
+
+    // The host is defending; mouse passing controls are not for the host now.
+    if (this.onlineEnabled && this.onlineRole === 'host' && this.cur2P === 1) {
+      return;
     }
+
+    if (!onlineGuest) {
+      for (const b of this.ui) {
+        if (bx >= b.x && bx <= b.x + b.w && by >= b.y && by <= b.y + b.h) { audio.uiClick(); b.cb(); return; }
+      }
+    }
+
+    if (onlineGuest) {
+      if (this.phase === 'banner') {
+        if (this.banner && this.banner.t > 0.5) {
+          this.cb.onOnlineInput?.({ type: 'action', action: 'banner' });
+        }
+        return;
+      }
+
+      if (this.phase === 'kick' && this.cur2P === 1) {
+        this.cb.onOnlineInput?.({ type: 'action', action: 'kick' });
+        return;
+      }
+
+      // This first control patch covers full Arcade and 7v7 gameplay.
+      if (this.cfg.drill || this.cur2P !== 1) return;
+
+      if (this.phase === 'presnap') {
+        this.cb.onOnlineInput?.({ type: 'action', action: 'snap' });
+        return;
+      }
+
+      if (this.phase !== 'play') return;
+    }
+
     if (this.phase === 'banner') { if (this.banner && this.banner.t > 0.5) this.bannerDone(); return; }
     if (this.phase === 'kick') { this.kickStop(); return; }
     if (this.phase === 'presnap' && this.cfg.drill) { this.snap(); return; }
@@ -1047,7 +1322,17 @@ export class GameEngine {
   private releaseThrow() {
     if (this.aim.valid && this.play === 'qb' && this.aim.power > 0.08) {
       const wr = this.aim.wrId >= 0 ? this.players[this.aim.wrId] : undefined;
-      this.throwAt(this.aim.tx, this.aim.ty, wr);
+      if (this.onlineEnabled && this.onlineRole === 'guest') {
+        this.cb.onOnlineInput?.({
+          type: 'throw',
+          tx: this.aim.tx,
+          ty: this.aim.ty,
+          power: this.aim.power,
+          wrId: this.aim.wrId,
+        });
+      } else {
+        this.throwAt(this.aim.tx, this.aim.ty, wr);
+      }
     }
     this.aim.active = false;
     this.aim.dx = 0;
@@ -1147,16 +1432,57 @@ export class GameEngine {
   private handleKey(e: KeyboardEvent, down: boolean) {
     const raw = e.key.toLowerCase();
     const k = raw === ' ' ? 'space' : raw;
-    if (down && ['space', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+
+    if (
+      down &&
+      ['space', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)
+    ) {
+      e.preventDefault();
+    }
+
     this.keys[k] = down;
     this.sprinting = !!this.keys['shift'];
-    if (!down || this.destroyed) return;
+
+    if (this.destroyed) return;
+
+    // A guest sends inputs to the host; it never simulates the match locally.
+    if (this.onlineEnabled && this.onlineRole === 'guest') {
+      if (k === 'm') {
+        if (down) audio.setMuted(!audio.muted);
+        return;
+      }
+
+      if (k === 'escape') return;
+
+      if (!this.paused) {
+        this.cb.onOnlineInput?.({ type: 'key', key: k, down });
+      }
+      return;
+    }
+
+    if (!down) return;
 
     const p2Playing = this.cfg.drill && this.twoP;
-    if (k === 'm') { audio.setMuted(!audio.muted); return; }
-    if (k === 'escape' || (k === 'p' && !p2Playing)) { this.setPaused(!this.paused); return; }
+    if (k === 'm') {
+      audio.setMuted(!audio.muted);
+      return;
+    }
+
+    if (k === 'escape' || (k === 'p' && !p2Playing)) {
+      this.setPaused(!this.paused);
+      return;
+    }
+
     if (this.paused) return;
     audio.ensure();
+
+    // When the guest has possession, the host's keyboard controls defense.
+    if (this.onlineEnabled && this.onlineRole === 'host' && this.cur2P === 1) {
+      if (k === 'q' || k === '[') this.selectOnlineDefender(-1);
+      else if (k === 'e' || k === ']') this.selectOnlineDefender(1);
+      else if (k === 'space') this.diveOnlineDefender();
+      return;
+    }
 
     if (this.phase === 'banner' && (k === 'space' || k === 'enter')) {
       if (this.banner && this.banner.t > 0.5) this.bannerDone();
@@ -1340,7 +1666,8 @@ export class GameEngine {
       { txt: 'PUNT TEAM', col: '#4dd8ff', size: 12 },
       { txt: msg, col: '#eaffea', size: 8 },
     ], 1.6, false, () => {
-      if (this.cfg.cpuSim) this.cpuDrive(false, fieldLeft);
+      if (this.onlineEnabled) this.beginOnlinePossession(fieldLeft);
+      else if (this.cfg.cpuSim) this.cpuDrive(false, fieldLeft);
       else this.nextPossession();
     });
   }
@@ -1600,6 +1927,25 @@ export class GameEngine {
       else if (p.kind === 'db') this.runDB(p, dt);
     }
 
+    if (this.onlineEnabled && !this.cfg.drill && this.play !== 'dead') {
+      const defender = this.players.find(
+        (p) => p.id === this.onlineDefenderId,
+      );
+
+      if (
+        defender &&
+        defender.ctrl &&
+        defender.stun <= 0 &&
+        defender.state !== 'down' &&
+        defender.state !== 'whiff' &&
+        defender.state !== 'dive' &&
+        defender.state !== 'tackling' &&
+        defender.state !== 'tackled'
+      ) {
+        this.driveEntity(defender, dt, defender.speed);
+      }
+    }
+
     // ---- drill control ----
     if (this.cfg.drill) {
       const me = this.ctrl();
@@ -1655,7 +2001,15 @@ export class GameEngine {
     if (car && this.play === 'run' && car.state !== 'tackled') {
       const autoSpeed = 3.4;  // steady upfield jog — never rockets
       let lateral = 0;
-      if (car.pad === 1) {
+
+      if (this.onlineEnabled) {
+        const keys = this.keysForPlayer(car);
+        if (keys['w'] || keys['arrowup']) lateral -= 1;
+        if (keys['s'] || keys['arrowdown']) lateral += 1;
+        if (car.pad === 0 && this.joy.active) {
+          lateral += this.joy.dx / 3.2;
+        }
+      } else if (car.pad === 1) {
         if (this.keys['i']) lateral -= 1;
         if (this.keys['k']) lateral += 1;
       } else {
@@ -1700,19 +2054,32 @@ export class GameEngine {
 
   private driveEntity(p: PlayerEnt, dt: number, spd: number, pocket = false) {
     let ix = 0, iy = 0;
-    if (p.pad === 1) {
-      // SIDE VIEW: I/K move across the field, J/L move up/down the field
+    const keys = this.keysForPlayer(p);
+
+    if (this.onlineEnabled) {
+      if (keys['w'] || keys['arrowup']) ix -= 1;
+      if (keys['s'] || keys['arrowdown']) ix += 1;
+      if (keys['d'] || keys['arrowright']) iy += 1;
+      if (keys['a'] || keys['arrowleft']) iy -= 1;
+
+      if (p.pad === 0 && this.joy.active) {
+        ix += this.joy.dx / 3.2;
+        iy += this.joy.dy / 3.2;
+      }
+    } else if (p.pad === 1) {
       if (this.keys['i']) ix -= 1;
       if (this.keys['k']) ix += 1;
       if (this.keys['l']) iy += 1;
       if (this.keys['j']) iy -= 1;
     } else {
-      // SIDE VIEW: W/S move across the field, A/D move up/down the field
       if (this.keys['w'] || this.keys['arrowup']) ix -= 1;
       if (this.keys['s'] || this.keys['arrowdown']) ix += 1;
       if (this.keys['d'] || this.keys['arrowright']) iy += 1;
       if (this.keys['a'] || this.keys['arrowleft']) iy -= 1;
-      if (this.joy.active) { ix += this.joy.dx / 3.2; iy += this.joy.dy / 3.2; }
+      if (this.joy.active) {
+        ix += this.joy.dx / 3.2;
+        iy += this.joy.dy / 3.2;
+      }
     }
     // burst only happens on route breaks, not catch/run transitions
     spd *= p.stumble > 0 ? 0.32 : (p.burst > 0 && !p.isCarrier ? 1.12 : 1);
@@ -2474,6 +2841,10 @@ export class GameEngine {
         this.setupPlay(); this.phase = 'presnap'; this.presnapT = 0;
         return;
       }
+      if (this.onlineEnabled) {
+        this.beginOnlinePossession(fieldLeft);
+        return;
+      }
       if (c.cpuSim) this.cpuDrive(true, fieldLeft);
       else this.nextPossession();
     });
@@ -2487,6 +2858,10 @@ export class GameEngine {
       this.setTicker('AGAIN - RUN IT BACK');
       this.phase = 'presnap';
       this.presnapT = 0;
+      return;
+    }
+    if (this.onlineEnabled) {
+      this.beginOnlinePossession(25);
       return;
     }
     if (c.cpuSim) { this.cpuDrive(false, 75); return; }
@@ -2541,7 +2916,37 @@ export class GameEngine {
     this.presnapT = 0;
   }
 
+  private beginOnlinePossession(fieldY = 25) {
+    this.cur2P = this.cur2P === 0 ? 1 : 0;
+    this.los = clamp(Math.floor(fieldY), 1, 99);
+    this.ltg = Math.min(100, this.los + 10);
+    this.down = 1;
+    this.convPlay = false;
+    this.convValue = 0;
+
+    this.setupPlay();
+
+    const offense = this.offTeam();
+    this.setTicker(`${offense.abbr} BALL - 1ST & 10`);
+    this.showBanner(
+      [
+        { txt: `${offense.abbr} BALL`, col: '#4dd8ff', size: 13 },
+        { txt: 'PRESS SPACE WHEN READY', col: '#ffd94d', size: 8 },
+      ],
+      999,
+      true,
+      () => {
+        this.phase = 'presnap';
+        this.presnapT = 0;
+      },
+    );
+  }
+
   private nextPossession() {
+    if (this.onlineEnabled) {
+      this.beginOnlinePossession(25);
+      return;
+    }
     const c = this.cfg;
     this.possIdx++;
     if (this.possIdx >= c.drives * 2) { this.gameOver(); return; }
@@ -2581,9 +2986,10 @@ export class GameEngine {
     if (!c.clocked || this.clock > 0) return false;
     if (this.half === 1) {
       this.half = 2;
-      this.clock = c.halfLen;
+      this.clock = REGULATION_HALF_SECONDS;
       audio.whistle(0.5);
       this.los = 25; this.ltg = 35; this.down = 1;
+      if (this.onlineEnabled) this.cur2P = this.cur2P === 0 ? 1 : 0;
       this.setupPlay();
       this.setTicker('2ND HALF UNDERWAY');
       this.showBanner([
@@ -2597,8 +3003,14 @@ export class GameEngine {
   }
 
   private addScore(n: number) {
-    if (this.cfg.id === 'two2') this.p2[this.cur2P] += n;
-    else this.scoreUs += n;
+    if (this.onlineEnabled) {
+      if (this.cur2P === 0) this.scoreUs += n;
+      else this.scoreThem += n;
+    } else if (this.cfg.id === 'two2') {
+      this.p2[this.cur2P] += n;
+    } else {
+      this.scoreUs += n;
+    }
   }
 
   private gameOver() {
@@ -2650,8 +3062,17 @@ export class GameEngine {
           { txt: `${k.kind === 'fg' ? `${k.distance} YD FIELD GOAL` : 'EXTRA POINT'}  ${k.good ? `+${k.points}` : '+0'}`, col: '#ffffff', size: 8 },
         ], 1.6, false, () => {
           this.cam.tzoom = 1;
-          if (k.kind === 'fg') { if (this.cfg.cpuSim) this.cpuDrive(false, 75); else this.nextPossession(); }
-          else this.postScore();
+          if (k.kind === 'fg') {
+            if (this.onlineEnabled) {
+              this.beginOnlinePossession(Math.max(2, 100 - this.los));
+            } else if (this.cfg.cpuSim) {
+              this.cpuDrive(false, 75);
+            } else {
+              this.nextPossession();
+            }
+          } else {
+            this.postScore();
+          }
         });
       }
     }
@@ -2729,51 +3150,118 @@ export class GameEngine {
     return {
       phase: this.phase,
       play: this.play,
+      result: this.result,
+      deadT: this.deadT,
       los: this.los,
+      ltg: this.ltg,
+      down: this.down,
       scoreUs: this.scoreUs,
       scoreThem: this.scoreThem,
-      p2: this.p2,
+      p2: [this.p2[0], this.p2[1]],
       clock: this.clock,
       half: this.half,
-      players: this.players.map(p => ({
-        id: p.id, x: p.x, y: p.y, face: p.face, anim: p.anim, animT: p.animT, stun: p.stun, stam: p.stam
+      possIdx: this.possIdx,
+      cur2P: this.cur2P,
+      carrierId: this.carrierId,
+      qbId: this.qbId,
+      onlineDefenderId: this.onlineDefenderId,
+      convValue: this.convValue,
+      convPlay: this.convPlay,
+      shell: this.shell,
+      shellRevealT: this.shellRevealT,
+      players: this.players.map((p) => ({
+        ...p,
+        route: p.route.map((point) => ({ ...point })),
       })),
-      ball: { x: this.ball.x, y: this.ball.y, z: this.ball.z, state: this.ball.state },
-      cam: { tx: this.cam.tx, ty: this.cam.ty, tzoom: this.cam.tzoom },
-      ticker: this.tickerMsg
+      ball: { ...this.ball },
+      cam: { ...this.cam },
+      ticker: this.tickerMsg,
+      tickerX: this.tickerX,
+      kick: { ...this.kick },
+      banner: this.banner
+        ? {
+            lines: this.banner.lines.map((line) => ({ ...line })),
+            t: this.banner.t,
+            dur: this.banner.dur,
+            needTap: this.banner.needTap,
+            dim: this.banner.dim,
+          }
+        : null,
+      tackleAnim: this.tackleAnim ? { ...this.tackleAnim } : null,
+      trauma: this.trauma,
+      flashA: this.flashA,
+      flashCol: this.flashCol,
+      stats: {
+        ...this.stats,
+        p2: [this.stats.p2[0], this.stats.p2[1]],
+      },
     };
   }
 
   applyRemoteState() {
     const s = this.remoteState;
     if (!s) return;
+
+    const wasOver = this.phase === 'over';
+
     this.phase = s.phase;
     this.play = s.play;
+    this.result = s.result ?? 'none';
+    this.deadT = s.deadT ?? 0;
     this.los = s.los;
+    this.ltg = s.ltg;
+    this.down = s.down;
     this.scoreUs = s.scoreUs;
     this.scoreThem = s.scoreThem;
-    this.p2 = s.p2;
+
+    if (Array.isArray(s.p2)) this.p2 = [s.p2[0], s.p2[1]];
     this.clock = s.clock;
     this.half = s.half;
-    this.tickerMsg = s.ticker;
-    
-    // Sync players
-    s.players.forEach((rp: any) => {
-      const lp = this.players.find(p => p.id === rp.id);
-      if (lp) {
-        lp.x = rp.x; lp.y = rp.y; lp.face = rp.face;
-        lp.anim = rp.anim; lp.animT = rp.animT;
-        lp.stun = rp.stun; lp.stam = rp.stam;
-      }
-    });
+    this.possIdx = s.possIdx ?? 0;
+    this.cur2P = s.cur2P === 1 ? 1 : 0;
+    this.carrierId = s.carrierId ?? -1;
+    this.qbId = s.qbId ?? 0;
+    this.onlineDefenderId = s.onlineDefenderId ?? -1;
+    this.convValue = s.convValue ?? 0;
+    this.convPlay = Boolean(s.convPlay);
+    this.shell = s.shell ?? this.shell;
+    this.shellRevealT = s.shellRevealT ?? 0;
+    this.tickerMsg = s.ticker ?? '';
+    this.tickerX = s.tickerX ?? 0;
 
-    // Sync ball
-    this.ball.x = s.ball.x; this.ball.y = s.ball.y;
-    this.ball.z = s.ball.z; this.ball.state = s.ball.state;
+    if (Array.isArray(s.players)) {
+      this.players = s.players.map((p: any) => ({
+        ...p,
+        route: Array.isArray(p.route) ? p.route.map((point: any) => ({ ...point })) : [],
+      }));
+    }
 
-    // Sync camera
-    this.cam.tx = s.cam.tx; this.cam.ty = s.cam.ty;
-    this.cam.tzoom = s.cam.tzoom;
+    if (s.ball) Object.assign(this.ball, s.ball);
+    if (s.cam) Object.assign(this.cam, s.cam);
+    if (s.kick) Object.assign(this.kick, s.kick);
+
+    this.banner = s.banner
+      ? { ...s.banner, onDone: null }
+      : null;
+
+    this.tackleAnim = s.tackleAnim ?? null;
+    this.trauma = s.trauma ?? 0;
+    this.flashA = s.flashA ?? 0;
+    this.flashCol = s.flashCol ?? '#ffffff';
+
+    if (s.stats) {
+      this.stats = {
+        ...this.stats,
+        ...s.stats,
+        p2: (Array.isArray(s.stats.p2)
+          ? [s.stats.p2[0], s.stats.p2[1]]
+          : this.stats.p2) as [number, number],
+      };
+    }
+
+    if (!wasOver && this.phase === 'over' && s.stats) {
+      this.cb.onOver({ ...this.stats });
+    }
   }
 
   private render() {
