@@ -47,10 +47,12 @@ export class NetworkClient {
   private sessionInfo: OnlineSession | null = this.loadSession();
 
   get connected(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN;   get isHost(): boolean 
+    return this.socket?.readyState === WebSocket.OPEN;
+  }
+
+  get isHost(): boolean {
     return (this.sessionInfo?.role ?? this.requestedRole) === 'host';
   }
-  
 
   /**
    * Connects to the WebSocket server.
@@ -230,6 +232,7 @@ export class NetworkClient {
       type: 'host',
       mode,
       team,
+      teamId: team,
       teamName: team,
       hostTeam: team,
       playerName,
@@ -295,6 +298,7 @@ export class NetworkClient {
       code,
       roomCode: code,
       team,
+      teamId: team,
       teamName: team,
       guestTeam: team,
       playerName,
