@@ -47,8 +47,10 @@ export class NetworkClient {
   private sessionInfo: OnlineSession | null = this.loadSession();
 
   get connected(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN;
+    return this.socket?.readyState === WebSocket.OPEN;   get isHost(): boolean 
+    return (this.sessionInfo?.role ?? this.requestedRole) === 'host';
   }
+  
 
   /**
    * Connects to the WebSocket server.
