@@ -33,6 +33,18 @@ function loadMods(): Mods {
   return { bigHead: false, moonBall: false, turbo: false, blitz: false };
 }
 
+function engineTeamsForRole(
+  teams: { teamId: string; oppId: string | null },
+  role: 'host' | 'guest' | null,
+) {
+  // Keep the host team as the engine's canonical home team on both screens.
+  if (role === 'guest' && teams.oppId) {
+    return { teamId: teams.oppId, oppId: teams.teamId };
+  }
+
+  return { teamId: teams.teamId, oppId: teams.oppId };
+}
+
 export default function App() {
   const [screen, setScreen] = useState<'menu' | 'game' | 'franchise'>('menu');
   const [modal, setModal] = useState<'none' | 'mods' | 'scores' | 'help' | 'teams' | 'online'>('none');
@@ -68,20 +80,38 @@ export default function App() {
   // create/destroy the engine with the game screen
   useEffect(() => {
     if (screen !== 'game' || !canvasRef.current) return;
+
+    const orderedTeams = engineTeamsForRole(teamsRef.current, onlineRole);
     const engine = new GameEngine(canvasRef.current, {
       onPause: (p) => setPaused(p),
-      onOver: (s) => { setResults({ ...s }); if (franchiseRef.current) franchiseResult(s); },
+      onOver: (s) => {
+        setResults({ ...s });
+        if (!onlineRole && franchiseRef.current) franchiseResult(s);
+      },
+      onOnlineInput: (input) => {
+        network.send({ type: 'game_input', input });
+      },
     });
     engineRef.current = engine;
-    engine.start(mode, modsRef.current, sideRef.current, twoPRef.current, teamsRef.current.teamId, teamsRef.current.oppId ?? undefined);
+    engine.setOnlineRole(onlineRole);
+    engine.start(
+      mode,
+      modsRef.current,
+      sideRef.current,
+      twoPRef.current,
+      orderedTeams.teamId,
+      orderedTeams.oppId ?? undefined,
+    );
+
     return () => {
       engine.destroy();
       engineRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screen]);
+  }, [screen, onlineRole]);
 
   const play = useCallback((m: ModeId, s: DrillSide, two: boolean) => {
+    setOnlineRole(null);
     setMode(m);
     setSide(s);
     sideRef.current = s;
@@ -96,8 +126,16 @@ export default function App() {
   const restart = useCallback(() => {
     setResults(null);
     setPaused(false);
-    engineRef.current?.start(mode, modsRef.current, sideRef.current, twoPRef.current, teamsRef.current.teamId, teamsRef.current.oppId ?? undefined);
-  }, [mode]);
+    const orderedTeams = engineTeamsForRole(teamsRef.current, onlineRole);
+    engineRef.current?.start(
+      mode,
+      modsRef.current,
+      sideRef.current,
+      twoPRef.current,
+      orderedTeams.teamId,
+      orderedTeams.oppId ?? undefined,
+    );
+  }, [mode, onlineRole]);
 
   const resume = useCallback(() => {
     engineRef.current?.setPaused(false);
@@ -112,25 +150,40 @@ export default function App() {
       if (!engine) return;
 
       if (onlineRole === 'host') {
-        // Host broadcasts the entire world state
-        const state = engine.getNetworkState();
-        network.send({ type: 'game_state', state });
+        network.send({
+          type: 'game_state',
+          state: engine.getNetworkState(),
+        });
       }
-    }, 50); // 20 times per second
+    }, 50);
 
     const onGameState = (data: any) => {
+      if (onlineRole !== 'guest') return;
+
       const engine = engineRef.current;
-      if (engine && onlineRole === 'guest') {
-        engine.isRemote = true;
-        engine.remoteState = data.state;
+      const state = data?.state ?? data;
+
+      if (engine && state) {
+        engine.remoteState = state;
+      }
+    };
+
+    const onGameInput = (data: any) => {
+      if (onlineRole !== 'host') return;
+
+      const engine = engineRef.current;
+      if (engine) {
+        engine.applyOnlineInput(data?.input ?? data);
       }
     };
 
     network.on('game_state', onGameState);
+    network.on('game_input', onGameInput);
 
     return () => {
       clearInterval(interval);
       network.off('game_state', onGameState);
+      network.off('game_input', onGameInput);
     };
   }, [screen, onlineRole]);
 
@@ -152,6 +205,7 @@ export default function App() {
 
   const franchisePlay = useCallback((oppId: string) => {
     if (!franchise) return;
+    setOnlineRole(null);
     setMode('arcade');
     teamsRef.current = { teamId: franchise.teamId, oppId };
     setTeams({ teamId: franchise.teamId, oppId });
@@ -328,13 +382,13 @@ export default function App() {
       {modal === 'scores' && screen === 'menu' && <ScoresModal onClose={() => setModal('none')} />}
       {modal === 'help' && screen === 'menu' && <HelpModal onClose={() => setModal('none')} />}
       {modal === 'online' && screen === 'menu' && (
-        <OnlineMenu 
+        <OnlineMenu
           onClose={() => setModal('none')}
           serverUrl={
-  window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? `ws://${window.location.hostname}:3000`
-    : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
-}
+            window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+              ? `ws://${window.location.hostname}:3000`
+              : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
+          }
           defaultTeam={teams.teamId}
           onStartGame={(isHost, gameMode, myTeam, oppTeam) => {
             setOnlineRole(isHost ? 'host' : 'guest');
@@ -345,7 +399,7 @@ export default function App() {
             setPaused(false);
             setModal('none');
             setScreen('game');
-          }} 
+          }}
         />
       )}
       {modal === 'teams' && screen === 'menu' && (
