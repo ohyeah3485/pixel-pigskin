@@ -309,6 +309,8 @@ export class GameEngine {
   isRemote = false;       // if true, we are the guest just rendering the host's state
   remoteState: any = null;
 
+  private routePassId = -1;
+
   stats = freshStats();
   crowd: { s: number; y: number; c: number }[] = [];
 
@@ -590,7 +592,7 @@ export class GameEngine {
     for (let i = 0; i < dbCount; i++) {
       const db = this.mk(id++, 'def', 'db', 0, 0, los + 2);
       const hips = c.practice ? rand(0.8, 0.92) : rand(0.95, 1.06);
-      db.speed = 7.0 * hips * defBoost * (c.practice ? 0.88 : 1);
+      db.speed = 7.3 * hips * defBoost * (c.practice ? 0.88 : 1);
       db.chaseSpeed = (c.practice ? 5.6 : 7.5) * defBoost;
       db.state = 'cover';
       this.players.push(db);
@@ -717,6 +719,7 @@ export class GameEngine {
     this.sprinting = false;
     this.breaksLeft = 2;
     this.tackleAnim = null;
+    this.routePassId = -1;
   }
 
   private mk(id: number, side: 'off' | 'def', kind: PlayerEnt['kind'], slot: number, x: number, y: number): PlayerEnt {
@@ -1017,31 +1020,29 @@ export class GameEngine {
     return clamp(risk, 0, 1);
   }
 
-  /**
-   * How contested this receiver will be WHEN THE BALL GETS THERE — not right
-   * now. Projects the receiver and every defender forward by the flight time,
-   * which is what the thrower actually needs to know.
-   */
-  coverageOf(wr: PlayerEnt): number {
-    // At catch resolution, compare defenders with the actual pass target,
-    // not a second prediction beyond where the ball was thrown.
-    const atPassTarget =
-      this.ball.state === 'air' || this.ball.state === 'loose';
-
-    const targetX = atPassTarget ? this.ball.tx : wr.x;
-    const targetY = atPassTarget ? this.ball.ty : wr.y;
-
-    let nearestDefender = 1e9;
+  private defenderTouchingReceiver(wr: PlayerEnt): PlayerEnt | null {
+    let closest: PlayerEnt | null = null;
+    let closestDistance = Infinity;
 
     for (const p of this.players) {
-      if (p.side !== 'def' || p.state === 'down' || p.state === 'whiff') continue;
+      if (p.side !== 'def') continue;
 
-      const gap = dist(p.x, p.y, targetX, targetY);
-      nearestDefender = Math.min(nearestDefender, gap);
+      // The players use circular hitboxes. The extra margin accounts for
+      // pixel-art sprites appearing to touch just before hitboxes overlap.
+      const touchDistance = wr.radius + p.radius + 0.18;
+      const d = dist(wr.x, wr.y, p.x, p.y);
+
+      if (d <= touchDistance && d < closestDistance) {
+        closest = p;
+        closestDistance = d;
+      }
     }
 
-    // A defender close to the landing point means higher coverage.
-    return clamp(1 - (nearestDefender - 1.5) / 4.0, 0, 1);
+    return closest;
+  }
+
+  coverageOf(wr: PlayerEnt): number {
+    return this.defenderTouchingReceiver(wr) ? 1 : 0;
   }
 
   flightTime(d: number) {
@@ -1244,7 +1245,7 @@ export class GameEngine {
     this.setTicker(this.cfg.drill ? `REP ${this.rep + 1} OF ${this.cfg.reps}` : this.downAndDist());
   }
 
-  throwAt(tx: number, ty: number, wr?: PlayerEnt) {
+  throwAt(tx: number, ty: number, wr?: PlayerEnt, keepReceiverOnRoute = false) {
     const qb = this.players[this.qbId];
     if (!qb || this.play !== 'qb') return;
     const d = dist(qb.x, qb.y, tx, ty);
@@ -1270,6 +1271,7 @@ export class GameEngine {
     b.h = (2.8 + d * 0.12) * (this.mods.moonBall ? 1.9 : 1) * this.arcFor(tx, ty) * powerMul;
     b.x = b.sx; b.y = b.sy; b.z = 1.4;
     b.wrId = target ? target.id : -1;
+    this.routePassId = keepReceiverOnRoute && target ? target.id : -1;
     this.play = 'air';
     this.stats.attempts++;
     this.qbThrowT = 0.35;
@@ -1279,7 +1281,9 @@ export class GameEngine {
     this.aim.active = false;
     this.aim.wrId = b.wrId;
     audio.throwWhoosh();
-    if (target) target.state = 'seek';
+    if (target) {
+      target.state = keepReceiverOnRoute ? 'route' : 'seek';
+    }
     // defenders need a beat to read the throw, then decide if they can get there
     for (const p of this.players) {
       if (p.side !== 'def') continue;
@@ -1289,14 +1293,109 @@ export class GameEngine {
     }
   }
 
+  /** Predict where a receiver will be by continuing his current route. */
+  private predictRoutePosition(
+    p: PlayerEnt,
+    seconds: number,
+  ): { x: number; y: number } {
+    let x = p.x;
+    let y = p.y;
+    let vx = p.vx;
+    let vy = p.vy;
+    let ri = p.ri;
+    let burst = p.burst;
+    let jam = p.jam;
+    let remaining = Math.max(0, seconds);
+    const maxStep = 1 / 30;
+
+    while (remaining > 1e-4) {
+      const dt = Math.min(maxStep, remaining);
+      burst = Math.max(0, burst - dt);
+      jam = Math.max(0, jam - dt);
+
+      const base = p.speed * (jam > 0 ? 0.7 : 1);
+      const wp = p.route[ri];
+
+      let tx: number;
+      let ty: number;
+      let speed = base;
+      let agility = 6.5;
+
+      if (!wp) {
+        tx = x + vx * 0.3;
+        ty = y + 6;
+        speed = base * 0.62;
+        agility = 4;
+      } else {
+        const waypointDistance = dist(x, y, wp.x, wp.y);
+
+        if (waypointDistance < (wp.brk ? 1.5 : 1.2)) {
+          ri++;
+
+          if (wp.brk) {
+            vx *= 0.3;
+            vy *= 0.3;
+            burst = 0.45;
+          }
+
+          remaining -= dt;
+          continue;
+        }
+
+        tx = wp.x;
+        ty = wp.y;
+
+        if (wp.brk && waypointDistance < 4.5) {
+          speed = base * lerp(0.62, 1, waypointDistance / 4.5);
+        }
+
+        if (burst > 0) speed = base * 1.12;
+        agility = wp.brk && waypointDistance < 3 ? 11 : 6.5;
+      }
+
+      const dx = tx - x;
+      const dy = ty - y;
+      const distance = Math.hypot(dx, dy);
+
+      if (distance < 0.05) {
+        vx *= 0.8;
+        vy *= 0.8;
+        remaining -= dt;
+        continue;
+      }
+
+      const moveSpeed = speed * this.stamMul(p);
+      const blend = Math.min(1, dt * agility);
+
+      vx += (dx / distance * moveSpeed - vx) * blend;
+      vy += (dy / distance * moveSpeed - vy) * blend;
+
+      x = clamp(x + vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
+      y += vy * dt;
+      remaining -= dt;
+    }
+
+    return { x, y };
+  }
+
   throwToSlot(n: number) {
     if (this.play !== 'qb' || this.cfg.drill) return;
+
     const wr = this.players.find((p) => p.kind === 'wr' && p.slot === n);
-    if (!wr) return;
     const qb = this.players[this.qbId];
-    const sol = this.solveLead(qb, wr, 0);
-    this.aim.power = 0.6;   // keyboard passes use a medium bullet
-    this.throwAt(sol.x, sol.y, wr);
+    if (!wr || !qb) return;
+
+    let flight = this.flightTime(dist(qb.x, qb.y, wr.x, wr.y));
+    let target = { x: wr.x, y: wr.y };
+
+    // Recalculate the target as both the ball and receiver travel.
+    for (let i = 0; i < 6; i++) {
+      target = this.predictRoutePosition(wr, flight);
+      flight = this.flightTime(dist(qb.x, qb.y, target.x, target.y));
+    }
+
+    this.aim.power = 0.78;
+    this.throwAt(target.x, target.y, wr, true);
   }
 
   startScramble() {
@@ -1572,10 +1671,17 @@ export class GameEngine {
       this.cam.ty = lerp(b.sy, b.ty, k) + 2;
       const wr = b.wrId >= 0 ? this.players[b.wrId] : null;
       if (wr && !wr.ctrl && (wr.state === 'seek' || wr.state === 'route')) {
-        // come back to the football — urgency ramps as it arrives
-        const urgency = 1.0 + 0.5 * k;
-        this.steer(wr, b.tx, b.ty, wr.speed * urgency, dt, 10 + k * 6);
-        if (b.T - b.t < 0.35) { wr.anim = 'catch'; wr.armT = 0.3; }
+        // For a number-key pass, leave the receiver on his assigned route.
+        // The normal offense update below advances that route.
+        if (wr.id !== this.routePassId || wr.state !== 'route') {
+          const urgency = 1.0 + 0.5 * k;
+          this.steer(wr, b.tx, b.ty, wr.speed * urgency, dt, 10 + k * 6);
+        }
+
+        if (b.T - b.t < 0.35) {
+          wr.anim = 'catch';
+          wr.armT = 0.3;
+        }
       }
       for (const p of this.players) {
         if (p.side === 'def' && p.playBall && p.stun <= 0 && p.state !== 'down' && !p.ctrl) {
@@ -2027,12 +2133,12 @@ export class GameEngine {
       const backpedal = p.cover === 'backpedal';
       // backpedalling he keeps a cushion downfield; once beaten he runs in
       // TRAIL position — a step behind the receiver's hip, not in front of him
-      const cushion = backpedal ? 2.0 : -0.4;
+      const cushion = backpedal ? 1.7 : -0.2;
       const lead = backpedal ? 0.05 : 0.14;
       const tx = wr.x + wr.vx * lead + p.leverage * (backpedal ? 0.8 : 0.5);
       const ty = wr.y + wr.vy * lead + cushion;
       // backpedaling is slower; a receiver who wins his break stays won
-      let spd = p.speed * (backpedal ? 0.84 : 0.95);
+      let spd = p.speed * (backpedal ? 0.88 : 1.0);
       if (p.flipT > 0) spd *= 0.72;
       const d = dist(p.x, p.y, tx, ty);
       if (d < 1.0) spd *= 0.55;
@@ -2170,40 +2276,39 @@ export class GameEngine {
       return;
     }
 
-    // Coverage changes the catch odds gradually instead of using a harsh cutoff.
-    const catchRadius = 5.0;
+    const catchRadius = 4.5;
 
     if (wr && wrD <= catchRadius) {
-      const cv = this.coverageOf(wr);
-      const contest = clamp((cv - 0.30) / 0.40, 0, 1);
-      const roll = Math.random();
+      const touchingDefender = this.defenderTouchingReceiver(wr);
 
-      // At maximum coverage: 45% incompletion and at most 10% interception.
-      const incompleteChance = this.cfg.practice ? 0 : 0.45 * contest;
-      const interceptionChance = this.cfg.practice ? 0 : 0.10 * contest;
+      // Arcade/7v7: open = 90% catch; physical contact = 30% catch.
+      // Practice keeps its existing guaranteed-catch behavior.
+      const catchChance = this.cfg.practice
+        ? 1
+        : touchingDefender
+          ? 0.30
+          : 0.90;
 
-      if (roll < incompleteChance) {
-        this.fx.popup(b.tx, b.ty, 'COVERED!', '#ff6b6b', 8);
+      if (Math.random() >= catchChance) {
+        if (touchingDefender) this.stats.breakups++;
+
+        this.fx.popup(
+          b.tx,
+          b.ty,
+          touchingDefender ? 'COVERED!' : 'DROPPED!',
+          touchingDefender ? '#ff6b6b' : '#ffd94d',
+          8,
+        );
         this.fx.puff(b.tx, b.ty);
-        if (picker) {
-          picker.anim = 'catch';
-          picker.armT = 0.3;
-        }
-        audio.ooh();
+
+        if (touchingDefender) audio.ooh();
+        else audio.dropThud();
+
         this.endPlay('inc', b.tx, b.ty, 0.4);
         return;
       }
 
-      if (
-        picker &&
-        dbD <= 2.2 &&
-        roll < incompleteChance + interceptionChance
-      ) {
-        this.pickSix(b, picker);
-        return;
-      }
-
-      if (contest >= 0.35) {
+      if (touchingDefender && !this.cfg.practice) {
         this.fx.popup(wr.x, wr.y + 1.6, 'THROUGH CONTACT!', '#ffd94d', 7);
       }
 
@@ -2231,7 +2336,7 @@ export class GameEngine {
       );
       audio.catchPop();
 
-      if (b.ty - this.los >= 20 && contest < 0.25) {
+      if (b.ty - this.los >= 20 && !touchingDefender) {
         this.fx.popup(wr.x, wr.y + 1.5, 'DIME!', '#4dd8ff', 8);
         audio.ding();
       }
