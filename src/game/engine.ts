@@ -590,7 +590,7 @@ export class GameEngine {
     for (let i = 0; i < dbCount; i++) {
       const db = this.mk(id++, 'def', 'db', 0, 0, los + 2);
       const hips = c.practice ? rand(0.8, 0.92) : rand(0.95, 1.06);
-      db.speed = 7.2 * hips * defBoost * (c.practice ? 0.88 : 1);
+      db.speed = 7.0 * hips * defBoost * (c.practice ? 0.88 : 1);
       db.chaseSpeed = (c.practice ? 5.6 : 7.5) * defBoost;
       db.state = 'cover';
       this.players.push(db);
@@ -1023,19 +1023,25 @@ export class GameEngine {
    * which is what the thrower actually needs to know.
    */
   coverageOf(wr: PlayerEnt): number {
-    const qb = this.qbId >= 0 ? this.players[this.qbId] : null;
-    if (!qb) return 0;
-    const sol = this.solveLead(qb, wr, 0);
-    let nd = 1e9;
+    // At catch resolution, compare defenders with the actual pass target,
+    // not a second prediction beyond where the ball was thrown.
+    const atPassTarget =
+      this.ball.state === 'air' || this.ball.state === 'loose';
+
+    const targetX = atPassTarget ? this.ball.tx : wr.x;
+    const targetY = atPassTarget ? this.ball.ty : wr.y;
+
+    let nearestDefender = 1e9;
+
     for (const p of this.players) {
       if (p.side !== 'def' || p.state === 'down' || p.state === 'whiff') continue;
-      // where he is now, plus how far he can close in the flight time
-      // simple: how far is this defender from the catch point RIGHT NOW?
-      const gap = dist(p.x, p.y, sol.x, sol.y);
-      nd = Math.min(nd, gap);
+
+      const gap = dist(p.x, p.y, targetX, targetY);
+      nearestDefender = Math.min(nearestDefender, gap);
     }
-    // 2 yards = blanketed, 6+ yards = wide open
-    return clamp(1 - (nd - 1.5) / 4.0, 0, 1);
+
+    // A defender close to the landing point means higher coverage.
+    return clamp(1 - (nearestDefender - 1.5) / 4.0, 0, 1);
   }
 
   flightTime(d: number) {
@@ -1105,7 +1111,7 @@ export class GameEngine {
 
         // Snap to the nearest receiver's lead point
         let bestId = -1;
-        let bestD = 7.0;
+        let bestD = 8.0;
         for (const p of this.players) {
           if (p.kind !== 'wr' || p.state === 'down') continue;
           const sol = this.solveLead(qb, p, 0);
@@ -1117,7 +1123,7 @@ export class GameEngine {
           const wr = this.players[bestId];
           const sol = this.solveLead(qb, wr, 0);
           // Pull aim toward receiver's lead point (rubber-band snap)
-          const pull = clamp(1 - bestD / 7.0, 0, 1) * 0.75;
+          const pull = clamp(1 - bestD / 8.0, 0, 1) * 0.60;
           this.aim.tx = lerp(rawX, sol.x, pull);
           this.aim.ty = lerp(rawY, sol.y, pull);
         }
@@ -1232,7 +1238,7 @@ export class GameEngine {
       if (p.kind === 'dl') p.state = 'rush';
       if (p.kind === 'db' && p.press) {
         const wr = p.assignment >= 0 ? this.players[p.assignment] : null;
-        if (wr && dist(p.x, p.y, wr.x, wr.y) < 2.2) wr.jam = 0.38;
+        if (wr && dist(p.x, p.y, wr.x, wr.y) < 2.2) wr.jam = 0.25;
       }
     }
     this.setTicker(this.cfg.drill ? `REP ${this.rep + 1} OF ${this.cfg.reps}` : this.downAndDist());
@@ -1277,7 +1283,7 @@ export class GameEngine {
     // defenders need a beat to read the throw, then decide if they can get there
     for (const p of this.players) {
       if (p.side !== 'def') continue;
-      p.reactT = rand(0.04, 0.14) * (this.cfg.practice ? 2.2 : 1);
+      p.reactT = rand(0.14, 0.28) * (this.cfg.practice ? 1.2 : 1);
       p.playBall = false;
       p.estX = 0; p.estY = 0; p.estMag = 0;
     }
@@ -1837,7 +1843,7 @@ export class GameEngine {
   /** route running with real breaks: gather, plant, explode out */
   private runRoute(p: PlayerEnt, dt: number) {
     if (this.play === 'run') { p.state = 'block'; return; }
-    const base = p.speed * (p.jam > 0 ? 0.5 : 1);
+    const base = p.speed * (p.jam > 0 ? 0.7 : 1);
     if (p.ri >= p.route.length) {
       this.steer(p, p.x + p.vx * 0.3, p.y + 6, base * 0.62, dt, 4);
       return;
@@ -1967,7 +1973,7 @@ export class GameEngine {
       const timeLeft = Math.max(0.01, b.T - b.t);
       if (p.reactT <= 0 && !p.playBall && p.estX === 0 && p.estY === 0) {
         const need = dist(p.x, p.y, b.tx, b.ty) / Math.max(1, p.speed);
-        p.playBall = need <= timeLeft * 1.05;
+        p.playBall = need <= timeLeft * 0.92;
         // tracking it over his shoulder: the less margin he has, the worse he
         // plays it — and being out of position is not something he recovers from
         const margin = timeLeft - need;
@@ -2026,7 +2032,7 @@ export class GameEngine {
       const tx = wr.x + wr.vx * lead + p.leverage * (backpedal ? 0.8 : 0.5);
       const ty = wr.y + wr.vy * lead + cushion;
       // backpedaling is slower; a receiver who wins his break stays won
-      let spd = p.speed * (backpedal ? 0.84 : 0.985);
+      let spd = p.speed * (backpedal ? 0.84 : 0.95);
       if (p.flipT > 0) spd *= 0.72;
       const d = dist(p.x, p.y, tx, ty);
       if (d < 1.0) spd *= 0.55;
@@ -2164,47 +2170,72 @@ export class GameEngine {
       return;
     }
 
-    // --- coverage-based catch outcome (matches the number badge colors) ---
-    // Green badge (open, cv < 0.42): almost always caught
-    // Grey badge (covered, cv >= 0.42): 70% incomplete, 20% interception, 10% caught
-    const uncontestedR = 4.5;
-    if (wr && wrD <= uncontestedR) {
+    // Coverage changes the catch odds gradually instead of using a harsh cutoff.
+    const catchRadius = 5.0;
+
+    if (wr && wrD <= catchRadius) {
       const cv = this.coverageOf(wr);
-      const tightlyCovered = cv >= 0.50;
+      const contest = clamp((cv - 0.30) / 0.40, 0, 1);
       const roll = Math.random();
-      
-      if (tightlyCovered && !this.cfg.practice) {
-        // grey badge: dangerous throw
-        if (roll < 0.70) {
-          // incomplete
-          this.fx.popup(b.tx, b.ty, 'COVERED!', '#ff6b6b', 8);
-          this.fx.puff(b.tx, b.ty);
-          if (picker) { picker.anim = 'catch'; picker.armT = 0.3; }
-          audio.ooh();
-          this.endPlay('inc', b.tx, b.ty, 0.4);
-          return;
+
+      // At maximum coverage: 45% incompletion and at most 10% interception.
+      const incompleteChance = this.cfg.practice ? 0 : 0.45 * contest;
+      const interceptionChance = this.cfg.practice ? 0 : 0.10 * contest;
+
+      if (roll < incompleteChance) {
+        this.fx.popup(b.tx, b.ty, 'COVERED!', '#ff6b6b', 8);
+        this.fx.puff(b.tx, b.ty);
+        if (picker) {
+          picker.anim = 'catch';
+          picker.armT = 0.3;
         }
-        if (roll < 0.90) {
-          // interception
-          this.pickSix(b, picker);
-          return;
-        }
-        // 10% contested catch — still got it
+        audio.ooh();
+        this.endPlay('inc', b.tx, b.ty, 0.4);
+        return;
+      }
+
+      if (
+        picker &&
+        dbD <= 2.2 &&
+        roll < incompleteChance + interceptionChance
+      ) {
+        this.pickSix(b, picker);
+        return;
+      }
+
+      if (contest >= 0.35) {
         this.fx.popup(wr.x, wr.y + 1.6, 'THROUGH CONTACT!', '#ffd94d', 7);
       }
-      
-      // clean catch (open receiver or the 10% contested catch)
+
       b.state = 'held';
       this.stats.completions++;
       this.stats.catches++;
+
       const diving = wrD > 2.0;
       this.becomeCarrier(wr, true);
-      if (diving) { wr.anim = 'dive'; wr.animT = 0; this.fx.grassBurst(wr.x, wr.y, 9, 1.1); }
+
+      if (diving) {
+        wr.anim = 'dive';
+        wr.animT = 0;
+        this.fx.grassBurst(wr.x, wr.y, 9, 1.1);
+      }
+
       wr.openness = 99;
       this.fx.catchFlash(wr.x, wr.y);
-      this.fx.popup(wr.x, wr.y, diving ? 'WHAT A GRAB!' : 'CAUGHT!', diving ? '#4dd8ff' : '#aaff3c', diving ? 8 : 7);
+      this.fx.popup(
+        wr.x,
+        wr.y,
+        diving ? 'WHAT A GRAB!' : 'CAUGHT!',
+        diving ? '#4dd8ff' : '#aaff3c',
+        diving ? 8 : 7,
+      );
       audio.catchPop();
-      if (b.ty - this.los >= 20 && !tightlyCovered) { this.fx.popup(wr.x, wr.y + 1.5, 'DIME!', '#4dd8ff', 8); audio.ding(); }
+
+      if (b.ty - this.los >= 20 && contest < 0.25) {
+        this.fx.popup(wr.x, wr.y + 1.5, 'DIME!', '#4dd8ff', 8);
+        audio.ding();
+      }
+
       this.aim.wrId = -1;
     } else if (picker && dbD <= 1.6 && dbD < 1.0) {
       if (this.cfg.practice) {
@@ -2214,6 +2245,7 @@ export class GameEngine {
         this.endPlay('inc', b.tx, b.ty, 0.4);
         return;
       }
+
       this.pickSix(b, picker);
     } else {
       this.fx.popup(b.tx, b.ty, 'INCOMPLETE', '#c9d4c9', 7);
