@@ -1,4 +1,4 @@
-import { audio } from './audio';
+import { audio, playRandomQbCall } from './audio';
 import { Fx } from './fx';
 import { MODES, Mods, ModeCfg, ModeId, FinalStats, DrillSide, Shell, SHELL_NAME } from './types';
 import { Team, getTeam, randomOpponent } from './teams';
@@ -1409,6 +1409,7 @@ export class GameEngine {
 
   snap() {
     if (this.phase !== 'presnap') return;
+    if (!this.cpuOffense) playRandomQbCall();
     audio.ensure();
     audio.hut(2);
     audio.snap();
