@@ -40,11 +40,15 @@ export function renderAll(e: GameEngine) {
 
   ctx.clearRect(0, 0, e.vw, e.vh);
   drawField(e, ctx, px, S);
-  drawEntities(e, ctx, px, S);
-  drawBall(e, ctx, px, S);
-  e.fx.render(ctx, px, S);
-  drawAim(e, ctx, px, S);
-  if (e.phase === 'kick') drawKickScene(e, ctx, px, S);
+
+  if (e.phase === 'kick') {
+    drawKickScene(e, ctx, px, S);
+  } else {
+    drawEntities(e, ctx, px, S);
+    drawBall(e, ctx, px, S);
+    e.fx.render(ctx, px, S);
+    drawAim(e, ctx, px, S);
+  }
   drawJoystick(e, ctx, px, S);
   drawFlash(e, ctx);
   drawHUD(e, ctx);
@@ -786,47 +790,54 @@ function drawKickerSprite(ctx: CanvasRenderingContext2D, x: number, y: number, k
 
 function drawKickScene(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: number) {
   const k = e.kick;
-  const by0 = k.kind === 'fg' ? Math.max(8, 100 - (k.distance - 17)) : 92;
+  const startY =
+    k.kind === 'fg'
+      ? Math.max(8, 100 - (k.distance - 17))
+      : 92;
+  const targetY = 104;
   const kit = kitFor(e, { side: 'off' } as PlayerEnt);
 
   if (k.sub === 'flight' || k.sub === 'result') {
-    const t = k.ballT;
-    const off = k.acc * 5.5 * (k.arrow > 0.5 ? 1 : -1);
-    const wx = off * t;
-    const wy = by0 + (110 - by0) * t;
-    const wz = Math.sin(t * Math.PI) * 15 * (1 - t * 0.2);
-    const [sx, sy] = px(wx, wy);
-    // ball shadow
-    ctx.globalAlpha = Math.max(0.06, 0.3 - wz * 0.012);
+    const t = clamp(k.ballT, 0, 1);
+    const lateral = (k.arrow - 0.5) * 11 * t;
+    const downfield = startY + (targetY - startY) * t;
+    const height = Math.sin(t * Math.PI) * 8;
+
+    const [sx, sy] = px(lateral, downfield);
+
+    // Ball shadow
+    ctx.globalAlpha = Math.max(0.06, 0.3 - height * 0.018);
     ctx.fillStyle = '#04140a';
     ctx.beginPath();
     ctx.ellipse(sx, sy + 2, 5, 2.2, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
-    // ball in flight with spin
-    const bsy = sy - wz * S * 0.8;
+
+    // Ball flight
     ctx.save();
-    ctx.translate(sx, bsy);
+    ctx.translate(sx, sy - height * S * 0.8);
     ctx.rotate(t * 8);
     ctx.fillStyle = '#8a4b21';
     ctx.fillRect(-4, -2.5, 8, 5);
     ctx.fillStyle = '#fff';
     ctx.fillRect(-1.5, -0.5, 3, 1);
     ctx.restore();
-    // kicker standing after the kick
-    const [kx2, ky2] = px(0, by0);
-    drawKickerSprite(ctx, kx2, ky2, kit, 1.0, true);
+
+    // Kicker follow-through
+    const [kx, ky] = px(0, startY);
+    drawKickerSprite(ctx, kx, ky, kit, 1, true);
   } else {
-    // ball on tee
-    const [sx, sy] = px(0, by0);
+    // Ball on the tee
+    const [sx, sy] = px(0, startY);
     ctx.fillStyle = '#666';
     ctx.fillRect(sx - 1.5, sy - 5, 3, 5);
     ctx.fillStyle = '#8a4b21';
     ctx.fillRect(sx - 3, sy - 9, 6, 4);
     ctx.fillStyle = '#fff';
     ctx.fillRect(sx - 1, sy - 8, 2, 2);
-    // holder kneeling
-    const [hx, hy] = px(-2, by0);
+
+    // Holder
+    const [hx, hy] = px(-2, startY);
     ctx.fillStyle = '#04140a';
     ctx.beginPath();
     ctx.ellipse(hx, hy + 2, 6, 2.5, 0, 0, Math.PI * 2);
@@ -837,30 +848,53 @@ function drawKickScene(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S
     ctx.fillRect(hx - 3, hy - 3, 6, 4);
     ctx.fillStyle = kit.helmet;
     ctx.fillRect(hx - 3, hy - 16, 6, 5);
-    // kicker approaching
+
+    // Kicker approach
     const prog = k.sub === 'runup' ? Math.min(1, k.t / 0.7) : 0;
-    const [kx, ky] = px(3.5 - prog * 3.5, by0 - 7 + prog * 7);
+    const [kx, ky] = px(3.5 - prog * 3.5, startY - 7 + prog * 7);
     drawKickerSprite(ctx, kx, ky, kit, prog, false);
   }
 
   if (k.sub === 'sweep') {
     const mw = Math.min(380, e.vw - 120);
-    const mx = e.vw / 2 - mw / 2, my = e.vh - 132, mh = 24;
+    const mx = e.vw / 2 - mw / 2;
+    const my = e.vh - 132;
+    const mh = 24;
+
     ctx.fillStyle = 'rgba(3,14,7,0.9)';
     ctx.fillRect(mx - 10, my - 38, mw + 20, mh + 70);
     ctx.strokeStyle = '#0f3d21';
     ctx.lineWidth = 3;
     ctx.strokeRect(mx - 10, my - 38, mw + 20, mh + 70);
+
     ctx.fillStyle = '#ff4d5e';
     ctx.fillRect(mx, my, mw, mh);
     ctx.fillStyle = '#ffd94d';
-    ctx.fillRect(mx + mw * (0.5 - k.window * 2.1), my, mw * k.window * 4.2, mh);
+    ctx.fillRect(
+      mx + mw * (0.5 - k.window * 2.1),
+      my,
+      mw * k.window * 4.2,
+      mh,
+    );
     ctx.fillStyle = '#aaff3c';
     ctx.fillRect(mx + mw * (0.5 - k.window), my, mw * k.window * 2, mh);
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = '#fff';
     ctx.fillRect(mx + k.arrow * mw - 2.5, my - 7, 5, mh + 14);
-    text(ctx, k.kind === 'fg' ? `${k.distance} YARD FIELD GOAL` : 'EXTRA POINT', e.vw / 2, my - 22, 9, '#eaffea');
-    text(ctx, e.isTouch ? 'TAP TO KICK' : 'SPACE TO KICK', e.vw / 2, my + mh + 18, 8, '#aaff3c');
+
+    const label =
+      k.kind === 'fg'
+        ? `${k.distance} YARD FIELD GOAL`
+        : 'EXTRA POINT';
+
+    text(ctx, label, e.vw / 2, my - 22, 9, '#eaffea');
+    text(
+      ctx,
+      e.isTouch ? 'TAP TO KICK' : 'SPACE TO KICK',
+      e.vw / 2,
+      my + mh + 18,
+      8,
+      '#aaff3c',
+    );
   }
 }
 
@@ -895,7 +929,14 @@ function drawHUD(e: GameEngine, ctx: CanvasRenderingContext2D) {
     if (c.clocked) {
       const urgent = e.clock < 16 && e.half === 2;
       text(ctx, `H${e.half}  ${e.clockStr()}`, W / 2, 18, 12, urgent ? (Math.sin(e.time * 8) > 0 ? '#ff4d5e' : '#eaffea') : '#eaffea');
-      text(ctx, e.downAndDist(), W / 2, 40, 10, '#ffd94d');
+      const centerLabel =
+        e.phase === 'kick'
+          ? e.kick.kind === 'fg'
+            ? `${e.kick.distance} YD FIELD GOAL`
+            : 'EXTRA POINT'
+          : e.downAndDist();
+
+      text(ctx, centerLabel, W / 2, 40, 10, '#ffd94d');
     } else if (c.id === 'two2') {
       text(ctx, `DRIVE ${Math.min(e.possIdx + 1, c.drives * 2)}/${c.drives * 2}`, W / 2, 18, 10, '#eaffea');
       text(ctx, e.downAndDist(), W / 2, 40, 10, '#ffd94d');
@@ -906,7 +947,7 @@ function drawHUD(e: GameEngine, ctx: CanvasRenderingContext2D) {
   }
 
   // ball-on strip
-  if (!c.drill) {
+  if (!c.drill && e.phase !== 'kick') {
     const bw = 170, bx = W / 2 - bw / 2, by = 64;
     ctx.fillStyle = 'rgba(3,14,7,0.8)';
     ctx.fillRect(bx - 4, by - 3, bw + 8, 13);
@@ -1318,7 +1359,11 @@ function drawHints(e: GameEngine, ctx: CanvasRenderingContext2D) {
     hints = ['ENTER GO', 'P PUNT', 'F FIELD GOAL'];
   } else if (e.phase === 'conv') {
     hints = e.cfg.conv === 'kick' ? ['K KICK', 'G GO FOR 2'] : ['1 ONE POINT', '2 TWO POINTS'];
-  } else if (e.phase === 'kick') hints = ['SPACE KICK'];
+  } else if (e.phase === 'kick') {
+    if (e.kick.kind === 'kickoff') hints = ['KICKOFF', 'RETURN READY'];
+    else if (e.kick.kind === 'punt' && e.kick.returnToPlayer) hints = ['PUNT RETURN', 'GET READY'];
+    else hints = [e.kick.kind === 'punt' ? 'SPACE PUNT' : 'SPACE KICK'];
+  }
   if (!hints.length) return;
   const y = e.vh - 22;
   ctx.fillStyle = 'rgba(3,13,7,0.82)';

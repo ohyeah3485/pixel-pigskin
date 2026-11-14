@@ -9,7 +9,7 @@ export const FIELD_HALF_W = 26.65;
 export type Phase = 'boot' | 'presnap' | 'fourth' | 'play' | 'kick' | 'conv' | 'banner' | 'over';
 export type Play = 'qb' | 'air' | 'run' | 'dead';
 export type DeadResult = 'none' | 'tackle' | 'oob' | 'inc' | 'sack' | 'int' | 'td' | 'whistle' | 'breakup';
-export type KickKind = 'xp' | 'fg';
+export type KickKind = 'xp' | 'fg' | 'kickoff' | 'punt';
 
 export interface PlayerEnt {
   id: number;
@@ -108,6 +108,11 @@ export interface KickState {
   points: number;
   distance: number;
   window: number;
+  startY: number;
+  endY: number;
+  returnSpot: number;
+  returnToPlayer?: boolean;
+  kickerSide?: 'off' | 'def';
 }
 
 /** a running tackle animation */
@@ -291,10 +296,25 @@ export class GameEngine {
   ui: UIButton[] = [];
   banner: Banner | null = null;
   kick: KickState = {
-    kind: 'xp', sub: 'sweep', t: 0, arrow: 0, dir: 1, acc: 0,
-    good: false, doink: false, ballT: 0, points: 1, distance: 20, window: 0.16,
+    kind: 'xp',
+    sub: 'sweep',
+    t: 0,
+    arrow: 0,
+    dir: 1,
+    acc: 0,
+    good: false,
+    doink: false,
+    ballT: 0,
+    points: 1,
+    distance: 20,
+    window: 0.16,
+    startY: 97,
+    endY: 110,
+    returnSpot: 0,
+    kickerSide: 'off',
   };
   tackleAnim: TackleAnim | null = null;
+  kickReturnActive = false;
 
   time = 0;
   playT = 0;
@@ -448,6 +468,7 @@ export class GameEngine {
     this.drillOpp = 0;
     this.carryStam = [1, 1];
     this.tackleAnim = null;
+    this.kickReturnActive = false;
     this.tickerMsg = `${this.team.city.toUpperCase()} ${this.team.name.toUpperCase()} VS ${this.opp.city.toUpperCase()} ${this.opp.name.toUpperCase()}`;
     audio.ensure();
     audio.setCrowd(0.55);
@@ -468,13 +489,42 @@ export class GameEngine {
       ], 2.2, false, () => { this.phase = 'presnap'; this.presnapT = 0; });
     } else {
       const possession = this.cfg.drives > 0;
+      const openingKickoff = this.cfg.specialTeams && !this.cfg.practice;
+
       const lines: BannerLine[] = [
-        { txt: `${this.team.abbr}  VS  ${this.opp.abbr}`, col: this.team.c1 === '#000000' ? '#eaffea' : this.team.c1, size: 16 },
-        { txt: possession ? `DRIVE 1 OF ${this.cfg.drives * 2}` : `${this.cfg.name} - YOUR BALL`, col: '#eaffea', size: 9 },
+        {
+          txt: `${this.team.abbr}  VS  ${this.opp.abbr}`,
+          col: this.team.c1 === '#000000' ? '#eaffea' : this.team.c1,
+          size: 16,
+        },
+        {
+          txt: openingKickoff
+            ? 'OPENING KICKOFF - YOU RETURN'
+            : possession
+              ? `DRIVE 1 OF ${this.cfg.drives * 2}`
+              : `${this.cfg.name} - YOUR BALL`,
+          col: '#eaffea',
+          size: 9,
+        },
       ];
-      if (!possession) lines.push({ txt: `OPP RATING ${Math.round((this.opp.off + this.opp.def) / 2)}`, col: '#ffd94d', size: 8 });
+
+      if (!possession) {
+        lines.push({
+          txt: `OPP RATING ${Math.round((this.opp.off + this.opp.def) / 2)}`,
+          col: '#ffd94d',
+          size: 8,
+        });
+      }
+
       this.setupPlay();
-      this.showBanner(lines, 1.8, false, () => { this.phase = 'presnap'; this.presnapT = 0; });
+      this.showBanner(lines, 1.8, false, () => {
+        if (openingKickoff) {
+          this.beginKickoffSequence(true);
+        } else {
+          this.phase = 'presnap';
+          this.presnapT = 0;
+        }
+      });
     }
     this.phase = 'banner';
     this.running = true;
@@ -1431,22 +1481,229 @@ export class GameEngine {
   fgDistance(): number { return Math.round(100 - this.los + 17); }
   fgInRange(): boolean { return this.fgDistance() <= 58; }
 
+  private frameKickCamera(startY: number, endY: number) {
+    const span = Math.max(8, Math.abs(endY - startY));
+    const sideMargin = this.landscape ? 72 : 40;
+
+    this.cam.tzoom = clamp(
+      (this.vw - sideMargin * 2) / (span * this.S),
+      0.62,
+      1.08,
+    );
+
+    // Center the kick's start and finish in the downfield screen direction.
+    const screenOffset = (0.5 - this.camBias) * this.vw;
+    this.cam.ty =
+      (startY + endY) / 2 - screenOffset / (this.S * this.cam.tzoom);
+
+    this.cam.tx = 0;
+    this.cam.x = 0;
+    this.cam.y = this.cam.ty;
+    this.cam.zoom = this.cam.tzoom;
+  }
+
+  private beginKickoffSequence(returnToPlayer: boolean) {
+    const startY = returnToPlayer ? 65 : 35;
+    const returnSpot = returnToPlayer ? 25 : 75;
+
+    this.kick = {
+      kind: 'kickoff',
+      sub: 'runup',
+      t: 0,
+      arrow: 0.5,
+      dir: 1,
+      acc: 0,
+      good: true,
+      doink: false,
+      ballT: 0,
+      points: 0,
+      distance: Math.abs(startY - returnSpot),
+      window: 0,
+      startY,
+      endY: returnSpot,
+      returnSpot,
+      returnToPlayer,
+      kickerSide: returnToPlayer ? 'def' : 'off',
+    };
+
+    this.kickReturnActive = false;
+    this.phase = 'kick';
+    this.play = 'dead';
+    this.frameKickCamera(startY, returnSpot);
+    this.setTicker(returnToPlayer ? 'OPPONENT KICKOFF' : 'KICKOFF TO OPPONENT');
+  }
+
+  private beginReceivedPunt(returnSpot = 35) {
+    const startY = 78;
+
+    this.kick = {
+      kind: 'punt',
+      sub: 'flight',
+      t: 0,
+      arrow: 0.5,
+      dir: 1,
+      acc: 0,
+      good: true,
+      doink: false,
+      ballT: 0,
+      points: 0,
+      distance: Math.abs(startY - returnSpot),
+      window: 0,
+      startY,
+      endY: returnSpot,
+      returnSpot,
+      returnToPlayer: true,
+      kickerSide: 'def',
+    };
+
+    this.phase = 'kick';
+    this.play = 'dead';
+    this.frameKickCamera(startY, returnSpot);
+    this.setTicker('OPPONENT PUNT - GET READY TO RETURN');
+  }
+
+  private beginKickReturn(returnSpot: number) {
+    this.los = clamp(Math.round(returnSpot), 8, 45);
+    this.ltg = Math.min(100, this.los + 10);
+    this.down = 1;
+    this.convPlay = false;
+
+    this.setupPlay();
+
+    const wrs = this.players.filter((p) => p.side === 'off' && p.kind === 'wr');
+    const returner = wrs[0];
+
+    if (!returner) {
+      this.phase = 'presnap';
+      this.presnapT = 0;
+      return;
+    }
+
+    for (const p of this.players) {
+      if (p.side === 'off') {
+        if (p.kind === 'qb') {
+          p.x = 0;
+          p.y = this.los - 8;
+          p.state = 'idle';
+        } else if (p.kind === 'ol') {
+          p.y = this.los - 3;
+          p.state = 'block';
+        } else if (p.kind === 'wr' && p !== returner) {
+          const index = wrs.indexOf(p);
+          p.x = clamp((index - (wrs.length - 1) / 2) * 5.2, -20, 20);
+          p.y = this.los + 2 + (index % 2) * 2;
+          p.route = [];
+          p.ri = 0;
+          p.state = 'block';
+        }
+
+        p.vx = 0;
+        p.vy = 0;
+      } else {
+        const defenders = this.players.filter((d) => d.side === 'def');
+        const index = defenders.indexOf(p);
+        const lane = (index - (defenders.length - 1) / 2) * 5.5;
+
+        p.x = clamp(lane, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+        p.y = this.los + 12 + (index % 2) * 4;
+        p.assignment = -1;
+        p.role = 'rush';
+        p.state = 'chase';
+        p.vx = 0;
+        p.vy = 0;
+      }
+    }
+
+    returner.x = 0;
+    returner.y = this.los;
+    returner.vx = 0;
+    returner.vy = 0;
+    returner.route = [];
+    returner.ri = 0;
+
+    this.kickReturnActive = true;
+    this.becomeCarrier(returner);
+
+    this.ball.state = 'held';
+    this.ball.x = returner.x;
+    this.ball.y = returner.y;
+    this.ball.z = 1;
+    this.ball.wrId = -1;
+
+    this.phase = 'play';
+    this.play = 'run';
+    this.playT = 0;
+    this.deadT = 0;
+    this.result = 'none';
+    this.cam.tx = 0;
+    this.cam.ty = this.clampCamY(this.los + 8);
+    this.cam.tzoom = 1;
+    this.setTicker('KICK RETURN - W/S TO DODGE');
+    audio.setCrowd(0.75);
+  }
+
   fourthGo() { this.phase = 'presnap'; this.presnapT = 0; this.setTicker('GOING FOR IT!'); audio.uiClick(); }
+
+  private beginPunt() {
+    const startY = this.los;
+    const endY = Math.min(110, startY + 41);
+
+    this.kick = {
+      kind: 'punt',
+      sub: 'sweep',
+      t: 0,
+      arrow: 0,
+      dir: 1,
+      acc: 0,
+      good: false,
+      doink: false,
+      ballT: 0,
+      points: 0,
+      distance: 41,
+      window: 0.2,
+      startY,
+      endY,
+      returnSpot: 0,
+      returnToPlayer: false,
+      kickerSide: 'off',
+    };
+
+    this.phase = 'kick';
+    this.frameKickCamera(startY, endY);
+    this.setTicker('PUNT');
+    audio.throwWhoosh();
+    audio.setCrowd(1.2);
+  }
 
   punt() {
     audio.uiClick();
-    audio.throwWhoosh();
-    const net = rand(34, 48);
-    let spot = this.los + net;
-    let msg = `PUNT NETS ${Math.round(net)} YARDS`;
-    if (spot >= 100) { spot = 80; msg = 'TOUCHBACK'; }
-    const fieldLeft = Math.max(2, 100 - spot);
+    this.beginPunt();
+  }
+
+  private finishPunt() {
+    const k = this.kick;
+    const touchback = k.endY >= 100;
+    const spot = touchback ? 80 : k.endY;
+    const returnYards = touchback
+      ? 0
+      : Math.round(rand(0, 12) * (1 - k.acc * 0.35));
+    const fieldLeft = Math.max(2, 100 - spot - returnYards);
+
     this.showBanner([
-      { txt: 'PUNT TEAM', col: '#4dd8ff', size: 12 },
-      { txt: msg, col: '#eaffea', size: 8 },
+      { txt: 'PUNT', col: '#4dd8ff', size: 12 },
+      {
+        txt: touchback
+          ? 'TOUCHBACK'
+          : `PUNT ${Math.round(k.distance)} YDS / RETURN ${returnYards} YDS`,
+        col: '#eaffea',
+        size: 8,
+      },
     ], 1.6, false, () => {
-      if (this.cfg.cpuSim) this.cpuDrive(false, fieldLeft);
-      else this.nextPossession();
+      if (this.cfg.cpuSim) {
+        this.cpuDrive(true, fieldLeft);
+      } else {
+        this.nextPossession(false, true);
+      }
     });
   }
 
@@ -1469,11 +1726,43 @@ export class GameEngine {
   }
 
   beginKick(points: number, kind: KickKind = 'xp', distance = 20, window = 0.17) {
-    this.kick = { kind, sub: 'sweep', t: 0, arrow: 0, dir: 1, acc: 0, good: false, doink: false, ballT: 0, points, distance, window };
+    const startY =
+      kind === 'fg'
+        ? Math.max(8, 100 - (distance - 17))
+        : 92;
+    const endY = 110;
+
+    this.kick = {
+      kind,
+      sub: 'sweep',
+      t: 0,
+      arrow: 0,
+      dir: 1,
+      acc: 0,
+      good: false,
+      doink: false,
+      ballT: 0,
+      points,
+      distance,
+      window,
+      startY,
+      endY,
+      returnSpot: 0,
+      returnToPlayer: false,
+      kickerSide: 'off',
+    };
+
     this.phase = 'kick';
-    this.cam.tzoom = 1.2;
-    this.cam.ty = this.clampCamY(this.los + 18);
+
+    const targetY = 104;
+    const visibleYards = this.vw / this.S;
+    const sideMargin = Math.max(1, (visibleYards - (targetY - startY)) / 2);
+
+    this.cam.ty = this.clampCamY(
+      startY + (this.camBias * this.vw) / this.S - sideMargin,
+    );
     this.cam.tx = 0;
+    this.cam.tzoom = 1;
     audio.setCrowd(1.4);
   }
 
@@ -1483,7 +1772,16 @@ export class GameEngine {
     k.acc = Math.abs(k.arrow - 0.5) * 2;
     k.good = k.acc <= k.window;
     k.doink = false;
-    if (!k.good && k.acc <= k.window * 2.1) { k.good = Math.random() < 0.45; k.doink = Math.random() < 0.45; }
+
+    if (k.kind === 'punt') {
+      k.distance = clamp(34 + (1 - k.acc) * 14, 30, 49);
+      k.startY = this.los;
+      k.endY = Math.min(110, k.startY + k.distance);
+      this.frameKickCamera(k.startY, k.endY);
+    } else if (!k.good && k.acc <= k.window * 2.1) {
+      k.good = Math.random() < 0.45;
+      k.doink = !k.good && Math.random() < 0.45;
+    }
     k.sub = 'runup';
     k.t = 0;
     audio.whistle(0.12);
@@ -1526,7 +1824,8 @@ export class GameEngine {
     this.shellRevealT = Math.max(0, this.shellRevealT - dt);
     const camLerp = this.play === 'air' ? 6.5 : 5.2;
     this.cam.x = lerp(this.cam.x, this.clampCamX(this.cam.tx), Math.min(1, dt * 4.5));
-    this.cam.y = lerp(this.cam.y, this.clampCamY(this.cam.ty), Math.min(1, dt * camLerp));
+    const cameraY = this.phase === 'kick' ? this.cam.ty : this.clampCamY(this.cam.ty);
+    this.cam.y = lerp(this.cam.y, cameraY, Math.min(1, dt * camLerp));
     this.cam.zoom = lerp(this.cam.zoom, this.cam.tzoom, Math.min(1, dt * 4));
     this.tickerX -= dt * 46;
     if (this.tickerX < -2400) this.tickerX = 0;
@@ -2489,6 +2788,8 @@ export class GameEngine {
   // ---------------- scoring / downs ----------------
 
   private onTouchdown(car: PlayerEnt) {
+    const wasKickReturn = this.kickReturnActive;
+    this.kickReturnActive = false;
     this.play = 'dead';
     this.result = 'td';
     this.deadT = 1.3;
@@ -2515,7 +2816,7 @@ export class GameEngine {
     this.stats.tds++;
     const gain = Math.floor(car.y - this.los);
     if (gain > this.stats.longest) this.stats.longest = gain;
-    this.registerYards(car);
+    this.registerYards(car, wasKickReturn);
     audio.whistle(0.25, 0.5);
     this.setTicker('TOUCHDOWN!');
     if (this.convPlay) {
@@ -2532,7 +2833,9 @@ export class GameEngine {
     });
   }
 
-  private registerYards(car: PlayerEnt) {
+  private registerYards(car: PlayerEnt, wasKickReturn = false) {
+    if (wasKickReturn) return;
+
     const gain = car.y - this.los;
     if (car.isQB && this.qbScramble) this.stats.rushYds += Math.max(0, Math.round(gain));
     else this.stats.passYds += Math.max(0, Math.round(gain));
@@ -2543,6 +2846,22 @@ export class GameEngine {
     if (this.result === 'td') return;
     const r = this.result;
     this.result = 'none';
+
+    if (this.kickReturnActive) {
+      this.kickReturnActive = false;
+      this.los = clamp(this.endY, 0.5, 99.2);
+      this.ltg = Math.min(100, this.los + 10);
+      this.down = 1;
+      this.setTicker(`KICK RETURN - BALL AT ${Math.round(this.los)}`);
+
+      if (this.checkClockBoundary()) return;
+
+      this.setupPlay();
+      this.phase = 'presnap';
+      this.presnapT = 0;
+      return;
+    }
+
     if (r === 'tackle' || r === 'oob' || r === 'whistle') {
       const spot = Math.max(0, Math.min(99.2, this.endY));
       if (!this.convPlay) this.los = spot;
@@ -2626,8 +2945,17 @@ export class GameEngine {
       this.presnapT = 0;
       return;
     }
-    if (c.cpuSim) { this.cpuDrive(false, 75); return; }
-    this.nextPossession();
+    if (c.cpuSim && c.specialTeams) {
+      this.beginKickoffSequence(false);
+      return;
+    }
+
+    if (c.cpuSim) {
+      this.cpuDrive(false, 75);
+      return;
+    }
+
+    this.nextPossession(c.specialTeams);
   }
 
   // ---------------- CPU drives (rating aware) ----------------
@@ -2660,25 +2988,45 @@ export class GameEngine {
     audio.setCrowd(0.8);
     if (scored === 7) { this.scoreThem += 7; audio.groan(); }
     else if (scored === 3) { this.scoreThem += 3; audio.ooh(); }
+    const opponentPunted = lineTxt.includes('PUNT');
+
     this.showBanner([
       { txt: `${this.opp.abbr} POSSESSION`, col: '#ff6b6b', size: 11 },
       { txt: lineTxt, col: scored > 0 ? '#ffd94d' : '#c9d4c9', size: 8 },
       { txt: `${this.team.abbr} ${this.scoreUs}  -  ${this.opp.abbr} ${this.scoreThem}`, col: '#eaffea', size: 9 },
-    ], 2.1, false, () => this.afterCpuDrive());
+    ], 2.1, false, () => this.afterCpuDrive(scored > 0, opponentPunted));
   }
 
-  private afterCpuDrive() {
+  private afterCpuDrive(opponentScored = false, opponentPunted = false) {
     if (this.checkClockBoundary()) return;
+
     this.los = Math.floor(rand(20, 35));
     this.ltg = this.los + 10;
     this.down = 1;
+
+    if (opponentScored && this.cfg.specialTeams) {
+      this.showBanner([
+        { txt: 'OPPONENT SCORES', col: '#ff6b6b', size: 12 },
+        { txt: 'GET READY TO RETURN THE KICK', col: '#ffd94d', size: 8 },
+      ], 1.2, false, () => this.beginKickoffSequence(true));
+      return;
+    }
+
+    if (opponentPunted && this.cfg.specialTeams) {
+      this.showBanner([
+        { txt: 'OPPONENT PUNT', col: '#4dd8ff', size: 12 },
+        { txt: 'GET READY TO RETURN IT', col: '#ffd94d', size: 8 },
+      ], 1.0, false, () => this.beginReceivedPunt());
+      return;
+    }
+
     this.setTicker('YOUR BALL - 1ST & 10');
     this.setupPlay();
     this.phase = 'presnap';
     this.presnapT = 0;
   }
 
-  private nextPossession() {
+  private nextPossession(startWithKickoff = false, startWithPuntReturn = false) {
     const c = this.cfg;
     this.possIdx++;
     if (this.possIdx >= c.drives * 2) { this.gameOver(); return; }
@@ -2694,7 +3042,16 @@ export class GameEngine {
       { txt: `${pn} - ${t.abbr}`, col: t.c1 === '#000000' ? '#eaffea' : t.c1, size: 13 },
       { txt: `DRIVE ${Math.floor(this.possIdx / 2) + 1} OF ${c.drives}`, col: '#eaffea', size: 8 },
       { txt: 'PRESS SPACE WHEN READY', col: '#ffd94d', size: 8 },
-    ], 999, true, () => { this.phase = 'presnap'; this.presnapT = 0; });
+    ], 999, true, () => {
+      if (startWithKickoff) {
+        this.beginKickoffSequence(true);
+      } else if (startWithPuntReturn) {
+        this.beginReceivedPunt();
+      } else {
+        this.phase = 'presnap';
+        this.presnapT = 0;
+      }
+    });
   }
 
   private tickClock(dt: number) {
@@ -2769,29 +3126,89 @@ export class GameEngine {
   private updateKick(dt: number) {
     const k = this.kick;
     k.t += dt;
+
     if (k.sub === 'sweep') {
       k.arrow += k.dir * dt * (k.kind === 'fg' ? 1.25 + k.distance * 0.008 : 1.3);
       if (k.arrow > 1) { k.arrow = 1; k.dir = -1; }
       if (k.arrow < 0) { k.arrow = 0; k.dir = 1; }
-    } else if (k.sub === 'runup') {
-      if (k.t > 0.7) { k.sub = 'flight'; k.t = 0; audio.snap(); this.trauma = Math.min(1, this.trauma + 0.18); }
-    } else if (k.sub === 'flight') {
-      k.ballT = Math.min(1, k.t / 1.15);
-      if (k.ballT >= 1) {
-        k.sub = 'result';
-        k.t = 0;
-        if (k.doink) audio.doink();
-        if (k.good) { this.addScore(k.points); audio.kickGood(); } else audio.kickBad();
-        this.showBanner([
-          { txt: k.doink ? 'OFF THE UPRIGHT!' : k.good ? "IT'S GOOD!" : 'NO GOOD...', col: k.good ? '#aaff3c' : '#ff6b6b', size: 13 },
-          { txt: `${k.kind === 'fg' ? `${k.distance} YD FIELD GOAL` : 'EXTRA POINT'}  ${k.good ? `+${k.points}` : '+0'}`, col: '#ffffff', size: 8 },
-        ], 1.6, false, () => {
-          this.cam.tzoom = 1;
-          if (k.kind === 'fg') { if (this.cfg.cpuSim) this.cpuDrive(false, 75); else this.nextPossession(); }
-          else this.postScore();
-        });
-      }
+      return;
     }
+
+    if (k.sub === 'runup') {
+      const runupTime = k.kind === 'kickoff' ? 0.55 : 0.7;
+
+      if (k.t > runupTime) {
+        k.sub = 'flight';
+        k.t = 0;
+        audio.snap();
+        this.trauma = Math.min(1, this.trauma + 0.18);
+      }
+
+      return;
+    }
+
+    if (k.sub !== 'flight') return;
+
+    k.ballT = Math.min(1, k.t / 1.15);
+    if (k.ballT < 1) return;
+
+    if (k.kind === 'kickoff') {
+      if (k.returnToPlayer) {
+        this.beginKickReturn(k.returnSpot);
+      } else {
+        this.cpuDrive(false, 75);
+      }
+      return;
+    }
+
+    if (k.kind === 'punt') {
+      if (k.returnToPlayer) {
+        this.beginKickReturn(k.returnSpot);
+      } else {
+        this.finishPunt();
+      }
+      return;
+    }
+
+    k.sub = 'result';
+    k.t = 0;
+
+    if (k.doink) audio.doink();
+    if (k.good) {
+      this.addScore(k.points);
+      audio.kickGood();
+    } else {
+      audio.kickBad();
+    }
+
+    this.showBanner([
+      {
+        txt: k.doink ? 'OFF THE UPRIGHT!' : k.good ? "IT'S GOOD!" : 'NO GOOD...',
+        col: k.good ? '#aaff3c' : '#ff6b6b',
+        size: 13,
+      },
+      {
+        txt: `${k.kind === 'fg' ? `${k.distance} YD FIELD GOAL` : 'EXTRA POINT'}  ${k.good ? `+${k.points}` : '+0'}`,
+        col: '#ffffff',
+        size: 8,
+      },
+    ], 1.6, false, () => {
+      if (k.kind === 'fg') {
+        if (k.good) {
+          if (this.cfg.cpuSim && this.cfg.specialTeams) {
+            this.beginKickoffSequence(false);
+          } else {
+            this.nextPossession(this.cfg.specialTeams);
+          }
+        } else if (this.cfg.cpuSim) {
+          this.cpuDrive(true, Math.max(2, 100 - this.los));
+        } else {
+          this.nextPossession();
+        }
+      } else {
+        this.postScore();
+      }
+    });
   }
 
   // ---------------- animation ----------------
@@ -2872,8 +3289,15 @@ export class GameEngine {
       p2: this.p2,
       clock: this.clock,
       half: this.half,
+      down: this.down,
+      ltg: this.ltg,
+      carrierId: this.carrierId,
+      kickReturnActive: this.kickReturnActive,
+      kick: { ...this.kick },
       players: this.players.map(p => ({
-        id: p.id, x: p.x, y: p.y, face: p.face, anim: p.anim, animT: p.animT, stun: p.stun, stam: p.stam
+        id: p.id, x: p.x, y: p.y, face: p.face, anim: p.anim, animT: p.animT, stun: p.stun, stam: p.stam,
+        state: p.state,
+        isCarrier: p.isCarrier,
       })),
       ball: { x: this.ball.x, y: this.ball.y, z: this.ball.z, state: this.ball.state },
       cam: { tx: this.cam.tx, ty: this.cam.ty, tzoom: this.cam.tzoom },
@@ -2892,6 +3316,14 @@ export class GameEngine {
     this.p2 = s.p2;
     this.clock = s.clock;
     this.half = s.half;
+    if (typeof s.down === 'number') this.down = s.down;
+    if (typeof s.ltg === 'number') this.ltg = s.ltg;
+    if (typeof s.carrierId === 'number') this.carrierId = s.carrierId;
+    this.kickReturnActive = s.kickReturnActive === true;
+
+    if (s.kick && typeof s.kick === 'object') {
+      this.kick = { ...this.kick, ...s.kick };
+    }
     this.tickerMsg = s.ticker;
     
     // Sync players
@@ -2901,6 +3333,8 @@ export class GameEngine {
         lp.x = rp.x; lp.y = rp.y; lp.face = rp.face;
         lp.anim = rp.anim; lp.animT = rp.animT;
         lp.stun = rp.stun; lp.stam = rp.stam;
+        if (rp.state) lp.state = rp.state;
+        if (typeof rp.isCarrier === 'boolean') lp.isCarrier = rp.isCarrier;
       }
     });
 
