@@ -554,10 +554,11 @@ function drawBall(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: num
     if (e.carrier()) return;
     const holder = !e.handoffInProgress && e.phase === 'play' && e.play === 'qb' ? e.players[e.qbId] : null;
     const [sx, sy] = px(holder ? holder.x : b.x, holder ? holder.y : b.y);
+    const tossLift = e.handoffInProgress ? (b.z - 1) * S * 0.8 : 0;
     ctx.fillStyle = '#8a4b21';
-    ctx.fillRect(sx + 2, sy - 11, 5.4, 3.6);
+    ctx.fillRect(sx + 2, sy - 11 - tossLift, 5.4, 3.6);
     ctx.fillStyle = '#fff';
-    ctx.fillRect(sx + 4.4, sy - 11, 1, 3.6);
+    ctx.fillRect(sx + 4.4, sy - 11 - tossLift, 1, 3.6);
     return;
   }
   const [sx, sy] = px(b.x, b.y);
@@ -796,14 +797,11 @@ function drawKickoffScene(
 ) {
   const k = e.kick;
   const kickSide: 'off' | 'def' = k.kickerSide === 'def' ? 'def' : 'off';
-  const receiveSide: 'off' | 'def' = kickSide === 'off' ? 'def' : 'off';
   const kickerKit = kitFor(e, { side: kickSide } as PlayerEnt);
-  const receiverKit = kitFor(e, { side: receiveSide } as PlayerEnt);
 
   const targetX = k.targetX ?? 0;
   const dir = k.endY >= k.startY ? 1 : -1;
   const t = k.sub === 'flight' ? clamp(k.ballT, 0, 1) : 0;
-  const receiverLineY = k.endY - dir * 8;
 
   // Orange landing tracker.
   const [ringX, ringY] = px(targetX, k.endY);
@@ -821,24 +819,8 @@ function drawKickoffScene(
   ctx.stroke();
   ctx.globalAlpha = 1;
 
-  // The human return formation is the same set of entities used after the catch.
-  if (k.returnToPlayer) {
-    drawEntities(e, ctx, px, S);
-  } else {
-    for (let i = -3; i <= 3; i++) {
-      const [sx, sy] = px(clamp(i * 6.2, -24, 24), receiverLineY + (Math.abs(i) % 2) * 1.5);
-      drawKickerSprite(ctx, sx, sy, receiverKit, 0, false);
-    }
-  }
-
-  // Kicking team's coverage line.
-  const coverageY = k.startY + (k.sub === 'flight' ? dir * t * 9 : 0);
-  if (!k.returnToPlayer) {
-    for (const wx of [-22, -16, -10, -4, 4, 10, 16, 22]) {
-      const [sx, sy] = px(wx, coverageY);
-      drawKickerSprite(ctx, sx, sy, kickerKit, 0, false);
-    }
-  }
+  // Both teams use the same entities during flight and after the catch.
+  drawEntities(e, ctx, px, S);
 
   // Kicker approaches the tee, then remains visible in follow-through.
   const runProg = k.sub === 'runup' ? clamp(k.t / 0.55, 0, 1) : 0;
@@ -876,13 +858,7 @@ function drawKickoffScene(
     ctx.fillStyle = '#fff';
     ctx.fillRect(-1.8, -0.5, 3.6, 1);
     ctx.restore();
-    if (!k.returnToPlayer && t > 0.70) {
-      const approach = clamp((t - 0.70) / 0.30, 0, 1);
-      const catcherY = receiverLineY + (k.endY - receiverLineY) * approach;
-      const [cx, cy] = px(targetX, catcherY);
-      drawKickerSprite(ctx, cx, cy, receiverKit, 0, false);
-      text(ctx, 'RETURNER', cx, cy - 28, 6, '#ffb066');
-    }
+
   }
   text(ctx, 'LANDING SPOT', ringX, ringY - 1.5 * S, 6, '#ffb066');
 
