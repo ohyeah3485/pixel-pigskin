@@ -552,7 +552,7 @@ function drawBall(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: num
   const b = e.ball;
   if (b.state === 'held') {
     if (e.carrier()) return;
-    const holder = e.phase === 'play' && e.play === 'qb' ? e.players[e.qbId] : null;
+    const holder = !e.handoffInProgress && e.phase === 'play' && e.play === 'qb' ? e.players[e.qbId] : null;
     const [sx, sy] = px(holder ? holder.x : b.x, holder ? holder.y : b.y);
     ctx.fillStyle = '#8a4b21';
     ctx.fillRect(sx + 2, sy - 11, 5.4, 3.6);
@@ -833,9 +833,11 @@ function drawKickoffScene(
 
   // Kicking team's coverage line.
   const coverageY = k.startY + (k.sub === 'flight' ? dir * t * 9 : 0);
-  for (const wx of [-22, -16, -10, -4, 4, 10, 16, 22]) {
-    const [sx, sy] = px(wx, coverageY);
-    drawKickerSprite(ctx, sx, sy, kickerKit, 0, false);
+  if (!k.returnToPlayer) {
+    for (const wx of [-22, -16, -10, -4, 4, 10, 16, 22]) {
+      const [sx, sy] = px(wx, coverageY);
+      drawKickerSprite(ctx, sx, sy, kickerKit, 0, false);
+    }
   }
 
   // Kicker approaches the tee, then remains visible in follow-through.
@@ -1517,7 +1519,7 @@ function drawHints(e: GameEngine, ctx: CanvasRenderingContext2D) {
   } else if (e.phase === 'play' && e.play === 'qb') {
     hints = ['CLICK THROW', '1-6 QUICK PASS', 'WASD MOVE', 'RMB SCRAMBLE'];
   } else if (e.play === 'run') {
-    hints = ['W/S LATERAL', 'A/D FORWARD/BACK', 'SHIFT SPRINT'];
+    hints = ['W/S LATERAL', 'A/D FORWARD/BACK', 'SPACE TRUCK', 'SHIFT SPRINT'];
   } else if (e.phase === 'fourth') {
     hints = ['ENTER GO', 'P PUNT', 'F FIELD GOAL'];
   } else if (e.phase === 'conv') {

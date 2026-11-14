@@ -164,7 +164,8 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
         <Row k="TAB" v="Switch defenders during a CPU possession" />
         <Row k="A / D" v="Move back and forward down the field" />
         <Row k="W / S" v="Move across the field (toward either sideline)" />
-        <Row k="SHIFT" v="Sprint — burns gas but helps you break tackles" />
+        <Row k="SHIFT" v="Sprint — drains stamina" />
+        <Row k="SPACE (CARRIER)" v="Manual truck: breaks a nearby tackle; a miss costs 10% stamina; success has a 3-second cooldown" />
         <Row k="1 - 6" v="Instant bullet to that numbered receiver" />
         <Row k="ENTER / P / F" v="4th down: Go for it / Punt / Field goal" />
         <Row k="K / G" v="Extra point: Kick or Go for 2" />
@@ -199,8 +200,8 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
         <div className="mt-3 border-3 border-[#3f2d12] bg-[#1a1205] p-3" style={{ borderWidth: 3 }}>
           <div className="font-pixel text-[8px] leading-relaxed text-[#ffd94d]">TACKLING</div>
           <p className="mt-1.5 text-[13px] leading-snug text-[#d8c9a8]">
-            In the main game defenders bring you down on contact — sprint into a hit and you can
-            <b className="text-[#ffd94d]"> break the first tackle</b>, but two or more defenders will wrap you up. In the
+            In the main game defenders bring you down on contact. Use a
+            <b className="text-[#ffd94d]"> manual truck</b> to knock down a nearby defender. In the
             1v1 drill the defender must <b className="text-[#ff4d5e]">commit to a dive</b>: get within range and you
             launch, wrap and drive the carrier backwards. Launch early and you sail past him, land on your face and burn
             a huge chunk of gas.

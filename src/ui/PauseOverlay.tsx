@@ -51,7 +51,7 @@ export function PauseOverlay({ onResume, onRestart, onQuit }: Props) {
         <div className="font-pixel mt-4 border-3 border-[#123a1e] bg-[#05160b] p-2.5 text-center text-[7px] leading-relaxed text-[#6d9a76]" style={{ borderWidth: 3 }}>
           SPACE SNAP * R RUN * WASD MOVE * 1-6 PASS
           <br />
-          CLICK THROW * SHIFT SPRINT * SPACE JUKE
+          CLICK THROW * SHIFT SPRINT * SPACE TRUCK (CARRIER)
           <br />
           TAB SWITCH DEFENDER * P PUNT * F FIELD GOAL
         </div>

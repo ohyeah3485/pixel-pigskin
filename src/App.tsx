@@ -16,13 +16,14 @@ const MODS_KEY = 'pixel-pigskin.mods';
 const TEAM_KEY = 'pixel-pigskin.team';
 
 function RunPlayButton({ engineRef }: { engineRef: RefObject<GameEngine | null> }) {
-  const [state, setState] = useState({ visible: false, selected: false });
+  const [state, setState] = useState({ visible: false, selected: false, runName: 'HB DIVE' });
   useEffect(() => {
     const update = () => {
       const engine = engineRef.current;
       const visible = !!engine && !engine.paused && engine.phase === 'presnap' && !engine.cfg.drill && !engine.cpuOffense;
       const selected = !!engine?.runSelected;
-      setState(previous => previous.visible === visible && previous.selected === selected ? previous : { visible, selected });
+      const next = { visible, selected, runName: engine?.selectedRunName ?? 'HB DIVE' };
+      setState(previous => previous.visible === next.visible && previous.selected === next.selected && previous.runName === next.runName ? previous : next);
     };
     update();
     const timer = window.setInterval(update, 100);
@@ -36,7 +37,7 @@ function RunPlayButton({ engineRef }: { engineRef: RefObject<GameEngine | null> 
       onClick={() => engineRef.current?.selectRun()}
       className={`pix-btn absolute left-1/2 bottom-[26%] -translate-x-1/2 px-4 py-2 text-[10px] ${state.selected ? 'bg-[#1d5c33] text-[#aaff3c]' : 'bg-[#3f3312] text-[#ffd94d]'}`}
     >
-      RUN [R]
+      RUN: {state.runName} [R]
     </button>
   );
 }
