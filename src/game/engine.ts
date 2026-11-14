@@ -101,7 +101,7 @@ interface Banner {
 
 export interface KickState {
   kind: KickKind;
-  sub: 'sweep' | 'runup' | 'flight' | 'result';
+  sub: 'choose' | 'sweep' | 'runup' | 'flight' | 'result';
   t: number; arrow: number; dir: number;
   acc: number; good: boolean; doink: boolean;
   ballT: number;
@@ -113,6 +113,8 @@ export interface KickState {
   returnSpot: number;
   returnToPlayer?: boolean;
   kickerSide?: 'off' | 'def';
+  targetX?: number;
+  returnLane?: -1 | 0 | 1;
 }
 
 /** a running tackle animation */
@@ -996,6 +998,10 @@ export class GameEngine {
       if (bx >= b.x && bx <= b.x + b.w && by >= b.y && by <= b.y + b.h) { audio.uiClick(); b.cb(); return; }
     }
     if (this.phase === 'banner') { if (this.banner && this.banner.t > 0.5) this.bannerDone(); return; }
+    if (this.phase === 'kick' && this.kick.kind === 'kickoff') {
+      if (this.kick.sub === 'choose') this.launchKickoff();
+      return;
+    }
     if (this.phase === 'kick') { this.kickStop(); return; }
     if (this.phase === 'presnap' && this.cfg.drill) { this.snap(); return; }
     // auto-snap: pulling back to aim auto-snaps the ball (like Retro Bowl)
@@ -1245,7 +1251,18 @@ export class GameEngine {
       if (k === 'space' || k === 'enter') { this.snap(); return; }
       return;
     }
-    if (this.phase === 'kick' && (k === 'space' || k === 'k' || k === 'enter')) { this.kickStop(); return; }
+    if (this.phase === 'kick') {
+      if (this.kick.kind === 'kickoff') {
+        if (this.kick.sub !== 'choose') return;
+        if (k === '1' || k === 'a' || k === 'arrowleft') this.selectKickoffLane(-1);
+        else if (k === '2' || k === 's' || k === 'arrowdown') this.selectKickoffLane(0);
+        else if (k === '3' || k === 'd' || k === 'arrowright') this.selectKickoffLane(1);
+        else if (k === 'space' || k === 'enter' || k === 'k') this.launchKickoff();
+        return;
+      }
+      if (k === 'space' || k === 'k' || k === 'enter') this.kickStop();
+      return;
+    }
     if (this.phase === 'conv') { this.pickConv(k); return; }
     if (this.phase !== 'play') return;
 
@@ -1461,6 +1478,13 @@ export class GameEngine {
     if (prev) prev.isCarrier = false;
     this.carrierId = p.id;
     p.isCarrier = true;
+    if (!this.cfg.drill && p.side === 'off') {
+      const pad: 0 | 1 = this.cfg.id === 'two2' ? this.cur2P : 0;
+      p.ctrl = true;
+      p.pad = pad;
+      if (pad === 0) { this.ctrlId = p.id; this.ctrlId2 = -1; }
+      else this.ctrlId2 = p.id;
+    }
     if (fromCatch) {
       p.anim = 'catch'; p.animT = 0; p.armT = 0.25;
       p.burst = 0;
@@ -1503,34 +1527,63 @@ export class GameEngine {
   }
 
   private beginKickoffSequence(returnToPlayer: boolean) {
+    // Each team kicks from its own 35 toward the receiving team's 5.
     const startY = returnToPlayer ? 65 : 35;
-    const returnSpot = returnToPlayer ? 25 : 75;
+    const endY = returnToPlayer ? 5 : 95;
+    const kickerSide = returnToPlayer ? 'def' : 'off';
+    const cpuLane = returnToPlayer ? pick([-1, 0, 1]) : 0;
 
     this.kick = {
-      kind: 'kickoff',
-      sub: 'runup',
-      t: 0,
-      arrow: 0.5,
-      dir: 1,
-      acc: 0,
-      good: true,
-      doink: false,
-      ballT: 0,
-      points: 0,
-      distance: Math.abs(startY - returnSpot),
-      window: 0,
-      startY,
-      endY: returnSpot,
-      returnSpot,
-      returnToPlayer,
-      kickerSide: returnToPlayer ? 'def' : 'off',
+      kind: 'kickoff', sub: 'choose', t: 0, arrow: 0.5, dir: 1,
+      acc: 0, good: true, doink: false, ballT: 0, points: 0,
+      distance: Math.abs(endY - startY), window: 0, startY, endY,
+      returnSpot: endY, returnToPlayer,
+      kickerSide,
+      targetX: cpuLane * 14, returnLane: 0,
     };
-
+    if (returnToPlayer) {
+      // Build the actual return play before the ball is kicked. Preserve zoom.
+      const zoom = this.cam.zoom, targetZoom = this.cam.tzoom;
+      this.los = endY;
+      this.ltg = Math.min(100, endY + 10);
+      this.down = 1;
+      this.convPlay = false;
+      this.setupPlay();
+      this.cam.zoom = zoom;
+      this.cam.tzoom = targetZoom;
+      this.positionKickReturn(this.kick.targetX ?? 0, this.kick.returnLane ?? 0);
+    }
     this.kickReturnActive = false;
     this.phase = 'kick';
     this.play = 'dead';
-    this.frameKickCamera(startY, returnSpot);
-    this.setTicker(returnToPlayer ? 'OPPONENT KICKOFF' : 'KICKOFF TO OPPONENT');
+    const initialOffset = (0.45 - this.camBias) * this.vw / (this.S * this.cam.zoom);
+    this.cam.x = 0;
+    this.cam.tx = 0;
+    this.cam.ty = startY - initialOffset;
+    this.cam.y = this.cam.ty;
+    this.setTicker(returnToPlayer
+      ? 'OPPONENT KICKOFF - PICK A RETURN LANE'
+      : 'KICKOFF - PICK A TARGET');
+  }
+
+  selectKickoffLane(lane: number) {
+    const k = this.kick;
+    if (this.phase !== 'kick' || k.kind !== 'kickoff' || k.sub !== 'choose') return;
+    const selected: -1 | 0 | 1 = lane < 0 ? -1 : lane > 0 ? 1 : 0;
+    if (k.returnToPlayer) {
+      k.returnLane = selected;
+      this.positionKickReturn(k.targetX ?? 0, selected);
+    } else k.targetX = selected * 14;
+    audio.uiHover();
+  }
+
+  launchKickoff() {
+    const k = this.kick;
+    if (this.phase !== 'kick' || k.kind !== 'kickoff' || k.sub !== 'choose') return;
+    k.sub = 'runup';
+    k.t = 0;
+    k.ballT = 0;
+    this.setTicker(k.returnToPlayer ? 'OPPONENT KICKOFF' : 'KICKOFF');
   }
 
   private beginReceivedPunt(returnSpot = 35) {
@@ -1562,83 +1615,69 @@ export class GameEngine {
     this.setTicker('OPPONENT PUNT - GET READY TO RETURN');
   }
 
-  private beginKickReturn(returnSpot: number) {
-    this.los = clamp(Math.round(returnSpot), 8, 45);
-    this.ltg = Math.min(100, this.los + 10);
-    this.down = 1;
-    this.convPlay = false;
+  // Position the same entities that will be used when the kick is caught.
+  private positionKickReturn(targetX: number, returnLane: -1 | 0 | 1) {
+    const returner = this.players.find((p) => p.side === 'off' && p.kind === 'wr');
+    if (!returner) return;
+    const catchX = clamp(targetX, -FIELD_HALF_W + 2, FIELD_HALF_W - 2);
+    const laneX = clamp(returnLane * 14, -FIELD_HALF_W + 2, FIELD_HALF_W - 2);
+    const blockers = this.players.filter((p) => p.side === 'off' && p !== returner && p.kind !== 'qb');
+    const defenders = this.players.filter((p) => p.side === 'def');
+    for (const p of this.players) {
+      if (p.side === 'off') {
+        if (p.kind === 'qb') {
+          p.x = 0; p.y = Math.max(0, this.los - 8); p.state = 'idle';
+        } else if (p === returner) {
+          p.x = catchX; p.y = this.los; p.state = 'idle';
+        } else {
+          const i = blockers.indexOf(p);
+          const blend = (i + 1) / (blockers.length + 1);
+          const offset = (i % 3 - 1) * 2.5;
+          p.x = clamp(catchX + (laneX - catchX) * blend + offset, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+          p.y = this.los + 3 + Math.floor(i / 3) * 2;
+          p.route = []; p.ri = 0; p.state = 'block';
+        }
+      } else {
+        const i = defenders.indexOf(p);
+        const spread = (i - (defenders.length - 1) / 2) * 5.5;
+        p.x = clamp(laneX + spread, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+        p.y = this.los + 12 + (i % 2) * 3.5;
+        p.assignment = -1; p.role = 'rush'; p.state = 'chase';
+      }
+      p.vx = 0; p.vy = 0;
+    }
+    returner.x = catchX; returner.y = this.los;
+    returner.vx = 0; returner.vy = 0;
+    returner.route = []; returner.ri = 0;
+  }
 
-    this.setupPlay();
-
-    const wrs = this.players.filter((p) => p.side === 'off' && p.kind === 'wr');
-    const returner = wrs[0];
-
+  private beginKickReturn(returnSpot: number, targetX = 0, returnLane: -1 | 0 | 1 = 0) {
+    if (this.kick.kind !== 'kickoff') {
+      this.los = clamp(Math.round(returnSpot), 2, 45);
+      this.ltg = Math.min(100, this.los + 10);
+      this.down = 1;
+      this.convPlay = false;
+      this.setupPlay();
+      this.positionKickReturn(targetX, returnLane);
+    }
+    const returner = this.players.find((p) => p.side === 'off' && p.kind === 'wr');
     if (!returner) {
       this.phase = 'presnap';
       this.presnapT = 0;
       return;
     }
-
-    for (const p of this.players) {
-      if (p.side === 'off') {
-        if (p.kind === 'qb') {
-          p.x = 0;
-          p.y = this.los - 8;
-          p.state = 'idle';
-        } else if (p.kind === 'ol') {
-          p.y = this.los - 3;
-          p.state = 'block';
-        } else if (p.kind === 'wr' && p !== returner) {
-          const index = wrs.indexOf(p);
-          p.x = clamp((index - (wrs.length - 1) / 2) * 5.2, -20, 20);
-          p.y = this.los + 2 + (index % 2) * 2;
-          p.route = [];
-          p.ri = 0;
-          p.state = 'block';
-        }
-
-        p.vx = 0;
-        p.vy = 0;
-      } else {
-        const defenders = this.players.filter((d) => d.side === 'def');
-        const index = defenders.indexOf(p);
-        const lane = (index - (defenders.length - 1) / 2) * 5.5;
-
-        p.x = clamp(lane, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
-        p.y = this.los + 12 + (index % 2) * 4;
-        p.assignment = -1;
-        p.role = 'rush';
-        p.state = 'chase';
-        p.vx = 0;
-        p.vy = 0;
-      }
-    }
-
-    returner.x = 0;
-    returner.y = this.los;
-    returner.vx = 0;
-    returner.vy = 0;
-    returner.route = [];
-    returner.ri = 0;
-
+    returner.speed = Math.min(7.5, Math.max(6.8, returner.speed));
+    returner.ctrl = true; returner.pad = 0;
+    this.ctrlId = returner.id; this.ctrlId2 = -1;
     this.kickReturnActive = true;
     this.becomeCarrier(returner);
-
-    this.ball.state = 'held';
-    this.ball.x = returner.x;
-    this.ball.y = returner.y;
-    this.ball.z = 1;
-    this.ball.wrId = -1;
-
-    this.phase = 'play';
-    this.play = 'run';
-    this.playT = 0;
-    this.deadT = 0;
+    returner.anim = 'catch'; returner.animT = 0; returner.armT = 0.25;
+    this.ball.state = 'held'; this.ball.x = returner.x; this.ball.y = returner.y;
+    this.ball.z = 1; this.ball.wrId = -1;
+    this.phase = 'play'; this.play = 'run'; this.playT = 0; this.deadT = 0;
     this.result = 'none';
-    this.cam.tx = 0;
-    this.cam.ty = this.clampCamY(this.los + 8);
-    this.cam.tzoom = 1;
-    this.setTicker('KICK RETURN - W/S TO DODGE');
+    this.cam.tx = returner.x; this.cam.ty = returner.y + 8;
+    this.setTicker('KICK RETURN - WASD / ARROWS TO RUN');
     audio.setCrowd(0.75);
   }
 
@@ -1998,7 +2037,10 @@ export class GameEngine {
         else if (p.state === 'route') this.runRoute(p, dt);
         else if (p.state === 'seek' && this.ball.state !== 'air') p.state = 'block';
         else if (p.state === 'block') this.runBlock(p, dt);
-      } else if (p.kind === 'ol') this.runOL(p, dt);
+      } else if (p.kind === 'ol') {
+        if (this.kickReturnActive) this.runBlock(p, dt);
+        else this.runOL(p, dt);
+      }
       else if (p.isQB && !p.isCarrier && this.play === 'qb' && !this.cfg.drill) this.pocketDrift(p, dt);
     }
 
@@ -2058,38 +2100,36 @@ export class GameEngine {
       return;
     }
 
-    // ---- carrier: Retro Bowl style auto-run ----
-    // The carrier jogs upfield automatically at a steady pace.
-    // The player can ONLY move laterally (W/S or up/down arrows) to dodge.
-    // No forward/backward acceleration — just like Retro Bowl.
     const car = this.carrier();
     if (car && this.play === 'run' && car.state !== 'tackled') {
-      const autoSpeed = 3.4;  // steady upfield jog — never rockets
-      let lateral = 0;
-      if (car.pad === 1) {
-        if (this.keys['i']) lateral -= 1;
-        if (this.keys['k']) lateral += 1;
+      if (car.ctrl) {
+        this.driveEntity(car, dt, car.speed);
+        this.cam.tx = car.x * 0.85;
+        this.cam.ty = car.y + 8;
+        this.checkRunState();
       } else {
-        if (this.keys['w'] || this.keys['arrowup']) lateral -= 1;
-        if (this.keys['s'] || this.keys['arrowdown']) lateral += 1;
-        if (this.joy.active) lateral += this.joy.dx / 3.2;
+        const autoSpeed = 3.4;
+        let lateral = 0;
+        if (car.pad === 1) {
+          if (this.keys['i']) lateral -= 1;
+          if (this.keys['k']) lateral += 1;
+        } else {
+          if (this.keys['w'] || this.keys['arrowup']) lateral -= 1;
+          if (this.keys['s'] || this.keys['arrowdown']) lateral += 1;
+          if (this.joy.active) lateral += this.joy.dx / 3.2;
+        }
+        lateral = clamp(lateral, -1, 1);
+        car.vy += (autoSpeed - car.vy) * Math.min(1, dt * 6);
+        car.vx += (lateral * 3.0 - car.vx) * Math.min(1, dt * 8);
+        car.vy = clamp(car.vy, -1, autoSpeed * 1.05);
+        car.vx = clamp(car.vx, -6, 6);
+        car.x = clamp(car.x + car.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
+        car.y += car.vy * dt;
+        if (Math.hypot(car.vx, car.vy) > 0.6) car.face = Math.atan2(car.vy, car.vx);
+        this.cam.tx = car.x * 0.85;
+        this.cam.ty = car.y + 8;
+        this.checkRunState();
       }
-      lateral = clamp(lateral, -1, 1);
-      // auto-run forward (downfield = +y in our coord system)
-      const targetVy = autoSpeed;
-      const targetVx = lateral * 3.0;  // lateral dodge speed
-      car.vy += (targetVy - car.vy) * Math.min(1, dt * 6);
-      car.vx += (targetVx - car.vx) * Math.min(1, dt * 8);
-      // hard cap so nothing bugs out
-      car.vy = clamp(car.vy, -1, autoSpeed * 1.05);
-      car.vx = clamp(car.vx, -6, 6);
-      car.x = clamp(car.x + car.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
-      car.y += car.vy * dt;
-      if (Math.hypot(car.vx, car.vy) > 0.6) car.face = Math.atan2(car.vy, car.vx);
-      if (Math.random() < dt * 8) this.fx.grassBurst(car.x, car.y - 0.3, 1, 0.4);
-      this.cam.tx = car.x * 0.85;
-      this.cam.ty = car.y + 8;
-      this.checkRunState();
     } else if (this.play === 'qb') {
       this.driveEntity(qb, dt, qb.speed * 0.8, true);
       if (this.cfg.canScramble && qb.y > this.los + 0.2) {
@@ -2128,6 +2168,7 @@ export class GameEngine {
     // burst only happens on route breaks, not catch/run transitions
     spd *= p.stumble > 0 ? 0.32 : (p.burst > 0 && !p.isCarrier ? 1.12 : 1);
     spd *= this.stamMul(p);
+    spd *= this.sprintingFor(p) ? 1.12 : 1;
     const il = Math.hypot(ix, iy);
     if (il > 0.01) {
       const nx = ix / Math.max(1, il), ny = iy / Math.max(1, il);
@@ -2141,6 +2182,7 @@ export class GameEngine {
     p.x = clamp(p.x + p.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
     p.y += p.vy * dt;
     if (pocket) p.y = clamp(p.y, this.los - 16, 108);
+    else if (p.isCarrier) p.y = clamp(p.y, 0, 108);
     if (Math.hypot(p.vx, p.vy) > 0.6) p.face = Math.atan2(p.vy, p.vx);
   }
 
@@ -2162,15 +2204,16 @@ export class GameEngine {
         if (p.side !== 'def' || p.stun > 0 || p.state === 'down' || p.state === 'whiff' || p.state === 'tackling') continue;
         const d = dist(p.x, p.y, car.x, car.y);
         if (p.state === 'dive' && d < 1.35) { this.landTackle(p, car); return; }
-        if (d < 1.05) { this.landTackle(p, car); return; }
+        if (d <= p.radius + car.radius + 0.22) { this.landTackle(p, car); return; }
       }
       return;
     }
     for (const p of this.players) {
       if (p.side !== 'def' || p.stun > 0 || p.state === 'down' || p.state === 'whiff' || p.state === 'tackling') continue;
       const dd = dist(p.x, p.y, car.x, car.y);
-      if (dd < 1.05) { this.attemptTackle(p, car); return; }
-      if (dd < 2.6 && dd > 1.1 && p.diveT <= 0 && p.state === 'chase' && Math.random() < 0.02) {
+      const tackleReach = p.radius + car.radius + 0.22;
+      if (dd <= tackleReach) { this.attemptTackle(p, car); return; }
+      if (dd < 2.6 && dd > tackleReach + 0.05 && p.diveT <= 0 && p.state === 'chase' && Math.random() < 0.02) {
         p.state = 'dive';
         p.diveT = 0.5;
         p.anim = 'dive';
@@ -2189,7 +2232,7 @@ export class GameEngine {
     p.vx *= Math.pow(0.25, dt);
     p.vy *= Math.pow(0.25, dt);
     const car = this.carrier();
-    if (car && car.state !== 'tackled' && dist(p.x, p.y, car.x, car.y) < 1.35) {
+    if (car && car.state !== 'tackled' && dist(p.x, p.y, car.x, car.y) <= p.radius + car.radius + 0.22) {
       if (this.cfg.drill) this.landTackle(p, car);
       else this.attemptTackle(p, car);
       return;
@@ -2498,7 +2541,8 @@ export class GameEngine {
       if (dist(p.x, p.y, car.x, car.y) < 2.4) help++;
     }
     const sprintOn = this.sprinting && car.stam > 0.05 && car.isCarrier;
-    let breakChance = 0.1 + (sprintOn ? 0.22 : 0) + (def.state === 'dive' ? 0.2 : 0) - help * 0.12;
+    let breakChance = 0.025 + (sprintOn ? 0.07 : 0) + (def.state === 'dive' ? 0.04 : 0) - help * 0.10;
+    breakChance = clamp(breakChance, 0, 0.14);
     if (this.breaksLeft <= 0) breakChance = 0;
     if (Math.random() < breakChance) {
       this.breaksLeft--;
@@ -3149,14 +3193,22 @@ export class GameEngine {
 
     if (k.sub !== 'flight') return;
 
-    k.ballT = Math.min(1, k.t / 1.15);
+    const flightDuration = k.kind === 'kickoff' ? 1.9 : 1.15;
+    k.ballT = Math.min(1, k.t / flightDuration);
+    if (k.kind === 'kickoff') {
+      const ballX = (k.targetX ?? 0) * k.ballT;
+      const ballY = k.startY + (k.endY - k.startY) * k.ballT;
+      this.cam.tx = this.clampCamX(ballX);
+      const lookAhead = (0.52 - this.camBias) * this.vw / (this.S * this.cam.tzoom);
+      this.cam.ty = ballY - lookAhead;
+    }
     if (k.ballT < 1) return;
 
     if (k.kind === 'kickoff') {
       if (k.returnToPlayer) {
-        this.beginKickReturn(k.returnSpot);
+        this.beginKickReturn(k.endY, k.targetX ?? 0, k.returnLane ?? 0);
       } else {
-        this.cpuDrive(false, 75);
+        this.cpuDrive(false, k.endY);
       }
       return;
     }
