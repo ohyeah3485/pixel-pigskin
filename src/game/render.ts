@@ -1,5 +1,5 @@
 import type { GameEngine, PlayerEnt, UIButton } from './engine';
-import { FIELD_HALF_W } from './engine';
+import { FIELD_HALF_W, FIELD_LENGTH, ENDZONE_DEPTH } from './engine';
 import { inkOn } from './teams';
 
 const FONT = '"Press Start 2P", monospace';
@@ -79,7 +79,7 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
   // crowd banks above and below the field
   for (const t of e.crowd) {
     const lateral = t.s === 0 ? -(FIELD_HALF_W + 2.5 + (t.c % 5) * 2.0) : FIELD_HALF_W + 2.5 + (t.c % 5) * 2.0;
-    const downf = -14 + t.y * 130;
+    const downf = -ENDZONE_DEPTH - 4 + t.y * (FIELD_LENGTH + 2 * ENDZONE_DEPTH + 10);
     const [sx, sy] = px(lateral, downf);
     if (sx < -6 || sx > W + 6 || sy < -6 || sy > H + 6) continue;
     ctx.globalAlpha = 0.45 + 0.55 * Math.abs(Math.sin(e.time * 2.2 + t.c * 2.7 + t.y * 40));
@@ -90,8 +90,8 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
 
   // track surround
   {
-    const [x0] = px(0, -14);
-    const [x1] = px(0, 114);
+    const [x0] = px(0, -ENDZONE_DEPTH - 4);
+    const [x1] = px(0, FIELD_LENGTH + ENDZONE_DEPTH + 4);
     const [, y0] = px(-FIELD_HALF_W - 2.2, 0);
     const [, y1] = px(FIELD_HALF_W + 2.2, 0);
     ctx.fillStyle = '#15382a';
@@ -99,31 +99,31 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
   }
 
   // turf bands every 5 yards (vertical stripes in side view)
-  for (let y = -10; y < 110; y += 5) {
+  for (let y = -ENDZONE_DEPTH; y < FIELD_LENGTH + ENDZONE_DEPTH; y += 5) {
     const [xa] = px(0, y);
     const [xb] = px(0, y + 5);
     if (xb < -20 || xa > W + 20) continue;
-    const band = Math.floor((y + 10) / 5);
-    if (y >= 100) ctx.fillStyle = dT.c1 === '#000000' ? '#1c1c1c' : dT.c1;
+    const band = Math.floor((y + ENDZONE_DEPTH) / 5);
+    if (y >= FIELD_LENGTH) ctx.fillStyle = dT.c1 === '#000000' ? '#1c1c1c' : dT.c1;
     else if (y < 0) ctx.fillStyle = oT.c1 === '#000000' ? '#1c1c1c' : oT.c1;
     else ctx.fillStyle = band % 2 === 0 ? PAL.turfA : PAL.turfB;
     ctx.fillRect(xa, topY, xb - xa, botY - topY);
-    if (y >= 100 || y < 0) {
+    if (y >= FIELD_LENGTH || y < 0) {
       ctx.fillStyle = 'rgba(0,0,0,0.25)';
       ctx.fillRect(xa, topY, xb - xa, botY - topY);
     }
   }
 
   // yard lines
-  for (let y = 0; y <= 100; y += 5) {
+  for (let y = 0; y <= FIELD_LENGTH; y += 5) {
     const [sx] = px(0, y);
     if (sx < -10 || sx > W + 10) continue;
     ctx.fillStyle = PAL.line;
     ctx.globalAlpha = y % 10 === 0 ? 0.9 : 0.6;
     ctx.fillRect(sx - 1, topY, 2, botY - topY);
     ctx.globalAlpha = 1;
-    if (y % 10 === 0 && y > 0 && y < 100) {
-      const num = y <= 50 ? String(y) : String(100 - y);
+    if (y % 10 === 0 && y > 0 && y < FIELD_LENGTH) {
+      const num = y <= FIELD_LENGTH / 2 ? String(y) : String(FIELD_LENGTH - y);
       ctx.globalAlpha = 0.7;
       text(ctx, num, sx, topY + 26, 10, PAL.line);
       text(ctx, num, sx, botY - 26, 10, PAL.line);
@@ -131,7 +131,7 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
     }
   }
   // hash marks
-  for (let y = 0; y <= 100; y += 1) {
+  for (let y = 0; y <= FIELD_LENGTH; y += 1) {
     const [sx] = px(0, y);
     if (sx < -4 || sx > W + 4) continue;
     const [, hy1] = px(-7, 0);
@@ -146,23 +146,23 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
   // sidelines
   ctx.fillStyle = PAL.line;
   {
-    const [x0] = px(0, -10);
-    const [x1] = px(0, 110);
+    const [x0] = px(0, -ENDZONE_DEPTH);
+    const [x1] = px(0, FIELD_LENGTH + ENDZONE_DEPTH);
     ctx.fillRect(x0, topY - 2, x1 - x0, 4);
     ctx.fillRect(x0, botY - 2, x1 - x0, 4);
     const [gx0] = px(0, 0);
-    const [gx1] = px(0, 100);
+    const [gx1] = px(0, FIELD_LENGTH);
     ctx.fillRect(gx0 - 2, topY, 4, botY - topY);
     ctx.fillRect(gx1 - 2, topY, 4, botY - topY);
   }
 
   // endzone wordmarks (rotated to read along the endzone)
-  drawEZText(e, ctx, px, 105, dT.name.toUpperCase(), inkOn(dT.c1));
-  drawEZText(e, ctx, px, -5, oT.name.toUpperCase(), inkOn(oT.c1));
+  drawEZText(e, ctx, px, FIELD_LENGTH + ENDZONE_DEPTH / 2, dT.name.toUpperCase(), inkOn(dT.c1));
+  drawEZText(e, ctx, px, -ENDZONE_DEPTH / 2, oT.name.toUpperCase(), inkOn(oT.c1));
 
   // midfield logo
   {
-    const [mx, my] = px(0, 50);
+    const [mx, my] = px(0, FIELD_LENGTH / 2);
     if (mx > -90 && mx < W + 90) {
       ctx.globalAlpha = 0.22;
       ctx.strokeStyle = '#f4f7ee';
@@ -176,7 +176,7 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
     }
   }
 
-  drawGoalPost(e, ctx, px, 100, S);
+  drawGoalPost(e, ctx, px, FIELD_LENGTH, S);
   drawGoalPost(e, ctx, px, 0, S);
 
   // LOS + first down markers
@@ -186,7 +186,7 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
     ctx.globalAlpha = 0.85;
     ctx.fillRect(lx - 1.5, topY, 3, botY - topY);
     ctx.globalAlpha = 1;
-    if (e.ltg <= 100 && !e.cfg.drill) {
+    if (e.ltg <= FIELD_LENGTH && !e.cfg.drill) {
       const [fx] = px(0, e.ltg);
       ctx.fillStyle = '#ffd94d';
       ctx.globalAlpha = 0.5 + 0.3 * Math.sin(e.time * 5);
@@ -207,7 +207,7 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
   }
 
   // pylons
-  for (const ey of [0, 100]) {
+  for (const ey of [0, FIELD_LENGTH]) {
     for (const ex of [-FIELD_HALF_W, FIELD_HALF_W]) {
       const [sx, sy] = px(ex, ey);
       if (sx < -10 || sx > W + 10) continue;
@@ -252,7 +252,7 @@ function drawEZText(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, atY:
   if (sx < -140 || sx > e.vw + 140) return;
   ctx.save();
   ctx.translate(sx, sy);
-  ctx.rotate(atY > 50 ? -Math.PI / 2 : Math.PI / 2);
+  ctx.rotate(atY > FIELD_LENGTH / 2 ? -Math.PI / 2 : Math.PI / 2);
   ctx.globalAlpha = 0.85;
   text(ctx, label.slice(0, 11), 0, 0, 15, col);
   ctx.globalAlpha = 1;
@@ -260,7 +260,7 @@ function drawEZText(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, atY:
 }
 
 function drawGoalPost(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, atY: number, S: number) {
-  const back = atY > 50 ? atY + 10 : atY - 10;
+  const back = atY > FIELD_LENGTH / 2 ? atY + ENDZONE_DEPTH : atY - ENDZONE_DEPTH;
   const [sx, cy] = px(0, back);
   if (sx < -60 || sx > e.vw + 60) return;
   const [, topY] = px(-3.1, 0);
@@ -1077,9 +1077,9 @@ function drawHUD(e: GameEngine, ctx: CanvasRenderingContext2D) {
     ctx.fillRect(bx, by, 5, 6);
     ctx.fillStyle = dT.c1 === '#000000' ? '#3a3a3a' : dT.c1;
     ctx.fillRect(bx + bw - 5, by, 5, 6);
-    if (e.ltg <= 100) { ctx.fillStyle = '#ffd94d'; ctx.fillRect(bx + (e.ltg / 100) * bw - 1, by - 2, 2, 10); }
+    if (e.ltg <= FIELD_LENGTH) { ctx.fillStyle = '#ffd94d'; ctx.fillRect(bx + (e.ltg / FIELD_LENGTH) * bw - 1, by - 2, 2, 10); }
     ctx.fillStyle = '#4dd8ff';
-    ctx.fillRect(bx + (e.los / 100) * bw - 1.5, by - 3, 3, 12);
+    ctx.fillRect(bx + (e.los / FIELD_LENGTH) * bw - 1.5, by - 3, 3, 12);
   }
 
   // ticker
@@ -1292,12 +1292,12 @@ function drawButtons(e: GameEngine, ctx: CanvasRenderingContext2D) {
     const bw = Math.min(180, (e.vw - 60) / 2);
     if (c.conv === 'kick') {
       const b1: UIButton = { id: 'kick1', x: mid - bw - 8, y: base - 150, w: bw, h: 64, label: 'KICK +1', sub: '[K]', color: '#aaff3c', cb: () => e.beginKick(1, 'xp', 20, 0.17) };
-      const b2: UIButton = { id: 'conv2', x: mid + 8, y: base - 150, w: bw, h: 64, label: 'GO FOR 2', sub: '[G]', color: '#ffd94d', cb: () => e.beginConvPlay(97, 2) };
+      const b2: UIButton = { id: 'conv2', x: mid + 8, y: base - 150, w: bw, h: 64, label: 'GO FOR 2', sub: '[G]', color: '#ffd94d', cb: () => e.beginConvPlay(FIELD_LENGTH - 3, 2) };
       styledButton(ctx, b1, '#113a1e'); styledButton(ctx, b2, '#3f3312');
       e.ui.push(b1, b2);
     } else {
-      const b1: UIButton = { id: 'conv1', x: mid - bw - 8, y: base - 150, w: bw, h: 64, label: '+1 TRY', sub: 'FROM 5  [1]', color: '#aaff3c', cb: () => e.beginConvPlay(95, 1) };
-      const b2: UIButton = { id: 'conv2', x: mid + 8, y: base - 150, w: bw, h: 64, label: '+2 TRY', sub: 'FROM 10  [2]', color: '#ffd94d', cb: () => e.beginConvPlay(90, 2) };
+      const b1: UIButton = { id: 'conv1', x: mid - bw - 8, y: base - 150, w: bw, h: 64, label: '+1 TRY', sub: 'FROM 5  [1]', color: '#aaff3c', cb: () => e.beginConvPlay(FIELD_LENGTH - 5, 1) };
+      const b2: UIButton = { id: 'conv2', x: mid + 8, y: base - 150, w: bw, h: 64, label: '+2 TRY', sub: 'FROM 10  [2]', color: '#ffd94d', cb: () => e.beginConvPlay(FIELD_LENGTH - 10, 2) };
       styledButton(ctx, b1, '#113a1e'); styledButton(ctx, b2, '#3f3312');
       e.ui.push(b1, b2);
     }

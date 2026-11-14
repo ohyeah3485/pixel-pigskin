@@ -5,6 +5,8 @@ import { Team, getTeam, randomOpponent } from './teams';
 import { renderAll } from './render';
 
 export const FIELD_HALF_W = 26.65;
+export const FIELD_LENGTH = 120;
+export const ENDZONE_DEPTH = 10;
 
 export type Phase = 'boot' | 'presnap' | 'fourth' | 'play' | 'kick' | 'conv' | 'banner' | 'over';
 export type Play = 'qb' | 'air' | 'run' | 'dead';
@@ -310,8 +312,8 @@ export class GameEngine {
     points: 1,
     distance: 20,
     window: 0.16,
-    startY: 97,
-    endY: 110,
+    startY: FIELD_LENGTH - 3,
+    endY: FIELD_LENGTH + ENDZONE_DEPTH,
     returnSpot: 0,
     kickerSide: 'off',
   };
@@ -415,8 +417,8 @@ export class GameEngine {
   get camBias() { return 0.28; }
 
   /** downfield yards visible to the left / right of the focus */
-  camYMin() { return -12 + (this.vw * this.camBias) / this.S; }
-  camYMax() { return 112 - (this.vw * (1 - this.camBias)) / this.S; }
+  camYMin() { return -ENDZONE_DEPTH - 2 + (this.vw * this.camBias) / this.S; }
+  camYMax() { return FIELD_LENGTH + ENDZONE_DEPTH + 2 - (this.vw * (1 - this.camBias)) / this.S; }
   clampCamY(y: number) {
     const a = this.camYMin();
     const b = this.camYMax();
@@ -591,7 +593,7 @@ export class GameEngine {
     this.players = [];
     this.resetPlayState();
     const los = convFrom !== undefined ? convFrom : this.los;
-    if (convFrom !== undefined) { this.los = convFrom; this.ltg = 100; this.down = 1; }
+    if (convFrom !== undefined) { this.los = convFrom; this.ltg = FIELD_LENGTH; this.down = 1; }
 
     let id = 0;
     const oT = this.offTeam();
@@ -693,7 +695,7 @@ export class GameEngine {
     this.players = [];
     this.resetPlayState();
     this.los = 30;
-    this.ltg = 100;
+    this.ltg = FIELD_LENGTH;
     this.down = 1;
     let id = 0;
     const offSpeed = this.mods.turbo ? 1.18 : 1;
@@ -1054,7 +1056,7 @@ export class GameEngine {
       py += (wr.vy / sp) * bias * 5.5;
     }
     px = clamp(px, -FIELD_HALF_W + 0.4, FIELD_HALF_W - 0.4);
-    py = clamp(py, this.los - 8, 108.5);
+    py = clamp(py, this.los - 8, FIELD_LENGTH + 8.5);
     return { x: px, y: py, T, d: dist(qb.x, qb.y, px, py) };
   }
 
@@ -1160,7 +1162,7 @@ export class GameEngine {
         const baseDist = 6 + this.aim.power * 36;
         const scale = baseDist / Math.max(0.1, Math.hypot(throwDownfield, throwLateral));
         
-        const rawY = clamp(qb.y + throwDownfield * scale, this.los - 8, 109);
+        const rawY = clamp(qb.y + throwDownfield * scale, this.los - 8, FIELD_LENGTH + 9);
         const rawX = clamp(qb.x + throwLateral   * scale, -FIELD_HALF_W + 0.5, FIELD_HALF_W - 0.5);
 
         this.aim.tx = rawX;
@@ -1331,7 +1333,7 @@ export class GameEngine {
     b.state = 'air';
     b.sx = qb.x; b.sy = qb.y;
     b.tx = clamp(tx, -FIELD_HALF_W, FIELD_HALF_W);
-    b.ty = clamp(ty, this.los - 6, 109);
+    b.ty = clamp(ty, this.los - 6, FIELD_LENGTH + 9);
     b.t = 0; b.T = T;
     // height: low power = high lob, high power = flat bullet (matches Retro Bowl feel)
     const powerMul = 1.35 - this.aim.power * 0.7;   // 1.35 (lob) → 0.65 (bullet)
@@ -1502,7 +1504,7 @@ export class GameEngine {
 
   // ---------------- special teams ----------------
 
-  fgDistance(): number { return Math.round(100 - this.los + 17); }
+  fgDistance(): number { return Math.round(FIELD_LENGTH - this.los + 17); }
   fgInRange(): boolean { return this.fgDistance() <= 58; }
 
   private frameKickCamera(startY: number, endY: number) {
@@ -1528,8 +1530,8 @@ export class GameEngine {
 
   private beginKickoffSequence(returnToPlayer: boolean) {
     // Each team kicks from its own 35 toward the receiving team's 5.
-    const startY = returnToPlayer ? 65 : 35;
-    const endY = returnToPlayer ? 5 : 95;
+    const startY = returnToPlayer ? FIELD_LENGTH - 35 : 35;
+    const endY = returnToPlayer ? 5 : FIELD_LENGTH - 5;
     const kickerSide = returnToPlayer ? 'def' : 'off';
     const cpuLane = returnToPlayer ? pick([-1, 0, 1]) : 0;
 
@@ -1545,7 +1547,7 @@ export class GameEngine {
       // Build the actual return play before the ball is kicked. Preserve zoom.
       const zoom = this.cam.zoom, targetZoom = this.cam.tzoom;
       this.los = endY;
-      this.ltg = Math.min(100, endY + 10);
+      this.ltg = Math.min(FIELD_LENGTH, endY + 10);
       this.down = 1;
       this.convPlay = false;
       this.setupPlay();
@@ -1587,7 +1589,7 @@ export class GameEngine {
   }
 
   private beginReceivedPunt(returnSpot = 35) {
-    const startY = 78;
+    const startY = Math.min(FIELD_LENGTH - 12, returnSpot + 43);
 
     this.kick = {
       kind: 'punt',
@@ -1654,7 +1656,7 @@ export class GameEngine {
   private beginKickReturn(returnSpot: number, targetX = 0, returnLane: -1 | 0 | 1 = 0) {
     if (this.kick.kind !== 'kickoff') {
       this.los = clamp(Math.round(returnSpot), 2, 45);
-      this.ltg = Math.min(100, this.los + 10);
+      this.ltg = Math.min(FIELD_LENGTH, this.los + 10);
       this.down = 1;
       this.convPlay = false;
       this.setupPlay();
@@ -1685,7 +1687,7 @@ export class GameEngine {
 
   private beginPunt() {
     const startY = this.los;
-    const endY = Math.min(110, startY + 41);
+    const endY = Math.min(FIELD_LENGTH + ENDZONE_DEPTH, startY + 41);
 
     this.kick = {
       kind: 'punt',
@@ -1721,12 +1723,12 @@ export class GameEngine {
 
   private finishPunt() {
     const k = this.kick;
-    const touchback = k.endY >= 100;
-    const spot = touchback ? 80 : k.endY;
+    const touchback = k.endY >= FIELD_LENGTH;
+    const spot = touchback ? FIELD_LENGTH - 20 : k.endY;
     const returnYards = touchback
       ? 0
       : Math.round(rand(0, 12) * (1 - k.acc * 0.35));
-    const fieldLeft = Math.max(2, 100 - spot - returnYards);
+    const fieldLeft = Math.max(2, FIELD_LENGTH - spot - returnYards);
 
     this.showBanner([
       { txt: 'PUNT', col: '#4dd8ff', size: 12 },
@@ -1757,19 +1759,19 @@ export class GameEngine {
     const c = this.cfg;
     if (c.conv === 'kick') {
       if (k === 'k' || k === '1' || k === 'enter') this.beginKick(1, 'xp', 20, 0.17);
-      else if (k === 'g' || k === '2') this.beginConvPlay(97, 2);
+      else if (k === 'g' || k === '2') this.beginConvPlay(FIELD_LENGTH - 3, 2);
     } else if (c.conv === 'play') {
-      if (k === '1') this.beginConvPlay(95, 1);
-      else if (k === '2') this.beginConvPlay(90, 2);
+      if (k === '1') this.beginConvPlay(FIELD_LENGTH - 5, 1);
+      else if (k === '2') this.beginConvPlay(FIELD_LENGTH - 10, 2);
     }
   }
 
   beginKick(points: number, kind: KickKind = 'xp', distance = 20, window = 0.17) {
     const startY =
       kind === 'fg'
-        ? Math.max(8, 100 - (distance - 17))
-        : 92;
-    const endY = 110;
+        ? Math.max(8, FIELD_LENGTH - (distance - 17))
+        : FIELD_LENGTH - 8;
+    const endY = FIELD_LENGTH + ENDZONE_DEPTH;
 
     this.kick = {
       kind,
@@ -1793,7 +1795,7 @@ export class GameEngine {
 
     this.phase = 'kick';
 
-    const targetY = 104;
+    const targetY = endY;
     const visibleYards = this.vw / this.S;
     const sideMargin = Math.max(1, (visibleYards - (targetY - startY)) / 2);
 
@@ -1815,7 +1817,7 @@ export class GameEngine {
     if (k.kind === 'punt') {
       k.distance = clamp(34 + (1 - k.acc) * 14, 30, 49);
       k.startY = this.los;
-      k.endY = Math.min(110, k.startY + k.distance);
+      k.endY = Math.min(FIELD_LENGTH + ENDZONE_DEPTH, k.startY + k.distance);
       this.frameKickCamera(k.startY, k.endY);
     } else if (!k.good && k.acc <= k.window * 2.1) {
       k.good = Math.random() < 0.45;
@@ -2181,8 +2183,8 @@ export class GameEngine {
     }
     p.x = clamp(p.x + p.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
     p.y += p.vy * dt;
-    if (pocket) p.y = clamp(p.y, this.los - 16, 108);
-    else if (p.isCarrier) p.y = clamp(p.y, 0, 108);
+    if (pocket) p.y = clamp(p.y, this.los - 16, FIELD_LENGTH + 8);
+    else if (p.isCarrier) p.y = clamp(p.y, 0, FIELD_LENGTH + 8);
     if (Math.hypot(p.vx, p.vy) > 0.6) p.face = Math.atan2(p.vy, p.vx);
   }
 
@@ -2191,7 +2193,7 @@ export class GameEngine {
     if (!car || car.state === 'tackled') return;
     const gain = car.y - this.los;
     if (gain > this.stats.longest) this.stats.longest = Math.floor(gain);
-    if (car.y >= 100) { this.onTouchdown(car); return; }
+    if (car.y >= FIELD_LENGTH) { this.onTouchdown(car); return; }
     if (Math.abs(car.x) >= FIELD_HALF_W - 0.15) {
       car.x = clamp(car.x, -FIELD_HALF_W, FIELD_HALF_W);
       if (this.cfg.drill) { this.endRep('oob'); return; }
@@ -2847,9 +2849,9 @@ export class GameEngine {
     this.flashCol = this.offColor().main;
     this.flashA = 0.3;
     const cols = [this.offColor().main, '#ffffff', '#ffd94d', this.offColor().dark];
-    this.fx.confetti(car.x, 104, 130, cols);
-    this.fx.confetti(car.x - 8, 102, 60, cols);
-    this.fx.confetti(car.x + 8, 102, 60, cols);
+    this.fx.confetti(car.x, FIELD_LENGTH + 4, 130, cols);
+    this.fx.confetti(car.x - 8, FIELD_LENGTH + 2, 60, cols);
+    this.fx.confetti(car.x + 8, FIELD_LENGTH + 2, 60, cols);
     audio.touchdownSting();
     audio.cheer(1.4);
 
@@ -2893,8 +2895,8 @@ export class GameEngine {
 
     if (this.kickReturnActive) {
       this.kickReturnActive = false;
-      this.los = clamp(this.endY, 0.5, 99.2);
-      this.ltg = Math.min(100, this.los + 10);
+      this.los = clamp(this.endY, 0.5, FIELD_LENGTH - 0.8);
+      this.ltg = Math.min(FIELD_LENGTH, this.los + 10);
       this.down = 1;
       this.setTicker(`KICK RETURN - BALL AT ${Math.round(this.los)}`);
 
@@ -2907,7 +2909,7 @@ export class GameEngine {
     }
 
     if (r === 'tackle' || r === 'oob' || r === 'whistle') {
-      const spot = Math.max(0, Math.min(99.2, this.endY));
+      const spot = Math.max(0, Math.min(FIELD_LENGTH - 0.8, this.endY));
       if (!this.convPlay) this.los = spot;
       const car = this.carrier();
       if (car) this.registerYards(car);
@@ -2922,12 +2924,12 @@ export class GameEngine {
         : [{ txt: 'CONVERSION FAILED', col: '#ffd94d', size: 11 }], 1.5, false, () => this.postScore());
       return;
     }
-    if (r === 'int') { this.onTurnover('INTERCEPTED!', '#ff4d5e', Math.max(2, 100 - this.endY)); return; }
+    if (r === 'int') { this.onTurnover('INTERCEPTED!', '#ff4d5e', Math.max(2, FIELD_LENGTH - this.endY)); return; }
 
     if (c.practice) {
       this.down = 1;
       this.ltg = this.los + 10;
-      if (this.los > 88) { this.los = 25; this.ltg = 35; }
+      if (this.los > FIELD_LENGTH - 12) { this.los = 25; this.ltg = 35; }
       this.setupPlay();
       this.phase = 'presnap';
       this.presnapT = 0;
@@ -2935,7 +2937,7 @@ export class GameEngine {
     }
     if (r !== 'inc' && this.los >= this.ltg) {
       this.down = 1;
-      this.ltg = Math.min(100, this.los + 10);
+      this.ltg = Math.min(FIELD_LENGTH, this.los + 10);
       audio.firstDown();
       this.setTicker('1ST DOWN - MOVE THE CHAINS');
       this.flashCol = '#ffd94d';
@@ -2945,7 +2947,7 @@ export class GameEngine {
       return;
     }
     this.down++;
-    if (this.down > 4) { this.onTurnover('TURNOVER ON DOWNS', '#ff9f3c', Math.max(2, 100 - this.los)); return; }
+    if (this.down > 4) { this.onTurnover('TURNOVER ON DOWNS', '#ff9f3c', Math.max(2, FIELD_LENGTH - this.los)); return; }
     if (this.checkClockBoundary()) return;
     this.nextSnap();
   }
@@ -2995,7 +2997,7 @@ export class GameEngine {
     }
 
     if (c.cpuSim) {
-      this.cpuDrive(false, 75);
+      this.cpuDrive(false, FIELD_LENGTH - 25);
       return;
     }
 
@@ -3012,7 +3014,7 @@ export class GameEngine {
     const myDef = this.team.def;
     // rating differential drives scoring odds
     let prob = 0.3 + (oppOff - myDef) * 0.006 + (c.id === 'seven7' ? 0.08 : 0);
-    if (shortField) prob += clamp((100 - fieldLeft) * 0.004, 0, 0.25);
+    if (shortField) prob += clamp((FIELD_LENGTH - fieldLeft) * 0.004, 0, 0.25);
     prob += Math.max(0, this.scoreThem - this.scoreUs) * 0.002;
     prob = clamp(prob, 0.1, 0.62);
     const roll = Math.random();
@@ -3193,7 +3195,7 @@ export class GameEngine {
 
     if (k.sub !== 'flight') return;
 
-    const flightDuration = k.kind === 'kickoff' ? 1.9 : 1.15;
+    const flightDuration = k.kind === 'kickoff' ? Math.max(1.9, k.distance / 31.5) : 1.15;
     k.ballT = Math.min(1, k.t / flightDuration);
     if (k.kind === 'kickoff') {
       const ballX = (k.targetX ?? 0) * k.ballT;
@@ -3253,7 +3255,7 @@ export class GameEngine {
             this.nextPossession(this.cfg.specialTeams);
           }
         } else if (this.cfg.cpuSim) {
-          this.cpuDrive(true, Math.max(2, 100 - this.los));
+          this.cpuDrive(true, Math.max(2, FIELD_LENGTH - this.los));
         } else {
           this.nextPossession();
         }
@@ -3304,7 +3306,7 @@ export class GameEngine {
     if (this.cfg.practice) return `1ST & ${Math.max(1, Math.ceil(this.ltg - this.los))}`;
     const d = Math.min(this.down, 4);
     const dn = ['', '1ST', '2ND', '3RD', '4TH'][d];
-    const dst = this.ltg >= 99.5 ? 'GOAL' : String(Math.max(1, Math.ceil(this.ltg - this.los)));
+    const dst = this.ltg >= FIELD_LENGTH - 0.5 ? 'GOAL' : String(Math.max(1, Math.ceil(this.ltg - this.los)));
     return `${dn} & ${dst}`;
   }
 
