@@ -160,6 +160,8 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
           <Keyboard size={13} /> <span className="font-pixel text-[8px]">KEYBOARD (SIDE VIEW)</span>
         </div>
         <Row k="SPACE" v="Snap the ball / kick" />
+        <Row k="R" v="Select a run before the snap" />
+        <Row k="TAB" v="Switch defenders during a CPU possession" />
         <Row k="A / D" v="Move back and forward down the field" />
         <Row k="W / S" v="Move across the field (toward either sideline)" />
         <Row k="SHIFT" v="Sprint — burns gas but helps you break tackles" />

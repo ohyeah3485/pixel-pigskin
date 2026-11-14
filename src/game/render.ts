@@ -710,7 +710,7 @@ function drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: numb
 }
 
 function drawJoystick(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: number) {
-  if (!e.joy.active || e.play !== 'run') return;
+  if (!e.joy.active || (e.play !== 'run' && !e.cpuOffense)) return;
   const [bx, by] = px(e.joy.bx, e.joy.by);
   ctx.globalAlpha = 0.25;
   ctx.fillStyle = '#eaffea';
@@ -916,10 +916,11 @@ function drawKickScene(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S
   const startY = k.startY;
   const targetY = k.endY;
   const kit = kitFor(e, { side: k.kickerSide === 'def' ? 'def' : 'off' } as PlayerEnt);
+  if (k.kind === 'punt') drawEntities(e, ctx, px, S);
 
   if (k.sub === 'flight' || k.sub === 'result') {
     const t = clamp(k.ballT, 0, 1);
-    const lateral = (k.arrow - 0.5) * 11 * t;
+    const lateral = k.kind === 'punt' ? 0 : (k.arrow - 0.5) * 11 * t;
     const downfield = startY + (targetY - startY) * t;
     const height = Math.sin(t * Math.PI) * 8;
 
@@ -944,9 +945,11 @@ function drawKickScene(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S
     ctx.restore();
 
     // Kicker follow-through
-    const [kx, ky] = px(0, startY);
-    drawKickerSprite(ctx, kx, ky, kit, 1, true);
-  } else {
+    if (k.kind !== 'punt') {
+      const [kx, ky] = px(0, startY);
+      drawKickerSprite(ctx, kx, ky, kit, 1, true);
+    }
+  } else if (k.kind !== 'punt') {
     // Ball on the tee
     const [sx, sy] = px(0, startY);
     ctx.fillStyle = '#666';
@@ -1004,7 +1007,7 @@ function drawKickScene(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S
     const label =
       k.kind === 'fg'
         ? `${k.distance} YARD FIELD GOAL`
-        : 'EXTRA POINT';
+        : k.kind === 'punt' ? 'PUNT' : 'EXTRA POINT';
 
     text(ctx, label, e.vw / 2, my - 22, 9, '#eaffea');
     text(
@@ -1250,8 +1253,13 @@ function drawButtons(e: GameEngine, ctx: CanvasRenderingContext2D) {
     return;
   }
 
+  if (e.cpuOffense && e.isTouch && (e.phase === 'presnap' || e.phase === 'play')) {
+    const switchPlayer: UIButton = { id: 'switchDefender', x: e.vw - 142, y: base - 90, w: 120, h: 48, label: 'SWITCH', sub: 'DEFENDER', color: '#ffd94d', cb: () => e.switchDefender() };
+    styledButton(ctx, switchPlayer, '#3f3312');
+    e.ui.push(switchPlayer);
+  }
   if (e.phase === 'presnap') {
-    if (!e.cfg.drill) {
+    if (!e.cfg.drill && !e.cpuOffense) {
       drawPlayCallPanel(e, ctx, mid, base);
     }
     if (e.isTouch) {
@@ -1499,9 +1507,11 @@ function drawHints(e: GameEngine, ctx: CanvasRenderingContext2D) {
   if (e.isTouch || e.phase === 'over' || e.phase === 'banner') return;
   let hints: string[] = [];
   if (e.phase === 'presnap') {
-    hints = e.cfg.drill
+    hints = e.cpuOffense ? ['WASD MOVE', 'TAB SWITCH DEFENDER'] : e.cfg.drill
       ? (e.twoP ? ['SPACE SNAP', 'WASD P1', 'IJKL P2', 'ESC PAUSE'] : ['SPACE SNAP', 'WASD MOVE', 'ESC PAUSE'])
-      : ['Q/E PLAY', 'DRAG AUTO-SNAP', '1-6 TARGET'];
+      : ['Q/E PLAY', 'R RUN', 'DRAG AUTO-SNAP', '1-6 TARGET'];
+  } else if (e.phase === 'play' && e.cpuOffense) {
+    hints = ['WASD MOVE', 'TAB SWITCH DEFENDER'];
   } else if (e.phase === 'play' && e.cfg.drill) {
     hints = e.twoP ? ['WASD P1', 'IJKL P2', 'F/P TACKLE'] : ['WASD MOVE', 'F TACKLE', 'R RESET'];
   } else if (e.phase === 'play' && e.play === 'qb') {
