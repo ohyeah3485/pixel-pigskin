@@ -1509,11 +1509,11 @@ function drawHints(e: GameEngine, ctx: CanvasRenderingContext2D) {
   if (e.isTouch || e.phase === 'over' || e.phase === 'banner') return;
   let hints: string[] = [];
   if (e.phase === 'presnap') {
-    hints = e.cpuOffense ? ['WASD MOVE', 'TAB SWITCH DEFENDER'] : e.cfg.drill
+    hints = e.cpuOffense ? ['WASD MOVE', 'Q SWITCH DEFENDER', 'F CHANGE DEFENSE'] : e.cfg.drill
       ? (e.twoP ? ['SPACE SNAP', 'WASD P1', 'IJKL P2', 'ESC PAUSE'] : ['SPACE SNAP', 'WASD MOVE', 'ESC PAUSE'])
       : ['Q/E PLAY', 'R RUN', 'DRAG AUTO-SNAP', '1-6 TARGET'];
   } else if (e.phase === 'play' && e.cpuOffense) {
-    hints = ['WASD MOVE', 'TAB SWITCH DEFENDER'];
+    hints = ['WASD MOVE', 'Q SWITCH DEFENDER', 'SPACE SWAT (PASS IN AIR)'];
   } else if (e.phase === 'play' && e.cfg.drill) {
     hints = e.twoP ? ['WASD P1', 'IJKL P2', 'F/P TACKLE'] : ['WASD MOVE', 'F TACKLE', 'R RESET'];
   } else if (e.phase === 'play' && e.play === 'qb') {

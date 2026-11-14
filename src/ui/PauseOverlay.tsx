@@ -53,7 +53,9 @@ export function PauseOverlay({ onResume, onRestart, onQuit }: Props) {
           <br />
           CLICK THROW * SHIFT SPRINT * SPACE TRUCK (CARRIER)
           <br />
-          TAB SWITCH DEFENDER * P PUNT * F FIELD GOAL
+          Q SWITCH DEFENDER * F CHANGE DEFENSE (PRESNAP)
+          <br />
+          SPACE SWAT (DEFENSE, PASS IN AIR) * P PUNT * F FIELD GOAL
         </div>
       </div>
     </div>

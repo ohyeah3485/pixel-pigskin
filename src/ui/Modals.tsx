@@ -161,7 +161,9 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
         </div>
         <Row k="SPACE" v="Snap the ball / kick" />
         <Row k="R" v="Select a run before the snap" />
-        <Row k="TAB" v="Switch defenders during a CPU possession" />
+        <Row k="Q" v="Switch defenders during a CPU possession" />
+        <Row k="F" v="Change defense before the CPU snap" />
+        <Row k="SPACE (DEFENSE)" v="Swat when a pass is in the air and your defender is nearby" />
         <Row k="A / D" v="Move back and forward down the field" />
         <Row k="W / S" v="Move across the field (toward either sideline)" />
         <Row k="SHIFT" v="Sprint — drains stamina" />

@@ -1,4 +1,5 @@
-import { audio, playRandomQbCall } from './audio';
+import { audio } from './audio';
+import { playRandomQbCall } from './qbAudio';
 import { Fx } from './fx';
 import { MODES, Mods, ModeCfg, ModeId, FinalStats, DrillSide, Shell, SHELL_NAME } from './types';
 import { Team, getTeam, randomOpponent } from './teams';
@@ -7,6 +8,17 @@ import { renderAll } from './render';
 export const FIELD_HALF_W = 26.65;
 export const FIELD_LENGTH = 120;
 export const ENDZONE_DEPTH = 10;
+
+type DefFront = '4-3' | '3-4' | 'Nickel' | 'Dime' | 'Goal Line';
+
+const DEF_FRONT_OPTIONS: DefFront[] = ['4-3', '3-4', 'Nickel', 'Dime', 'Goal Line'];
+const DEF_FRONT_PERSONNEL: Record<DefFront, { dl: number; lb: number; db: number }> = {
+  '4-3': { dl: 4, lb: 3, db: 4 },
+  '3-4': { dl: 3, lb: 4, db: 4 },
+  Nickel: { dl: 4, lb: 2, db: 5 },
+  Dime: { dl: 4, lb: 1, db: 6 },
+  'Goal Line': { dl: 5, lb: 4, db: 2 },
+};
 
 export type Phase = 'boot' | 'presnap' | 'fourth' | 'play' | 'kick' | 'conv' | 'banner' | 'over';
 export type Play = 'qb' | 'air' | 'run' | 'dead';
@@ -246,6 +258,7 @@ export class GameEngine {
   qbThrowT = 0;
 
   shell: Shell = 'man';
+  defenseFormation: DefFront = 'Nickel';
   shellRevealT = 0;
 
   los = 25;
@@ -659,9 +672,17 @@ export class GameEngine {
       this.players.push(wr);
     });
 
-    const extraRush = this.shell === 'blitz' ? 1 : 0;
-    const dlCount = c.dl + extraRush;
-    const dlXs = dlCount === 1 ? [0] : dlCount === 2 ? [-3.4, 3.4] : [-4.6, 0, 4.6];
+    const offenseCount = Math.max(1, this.players.filter((p) => p.side === 'off').length);
+    const personnel = DEF_FRONT_PERSONNEL[this.defenseFormation];
+    const scale = offenseCount / 11;
+    const baseDL = Math.min(offenseCount, Math.max(1, Math.round(personnel.dl * scale)));
+    const baseLB = Math.min(offenseCount - baseDL, Math.max(0, Math.round(personnel.lb * scale)));
+    const baseDB = offenseCount - baseDL - baseLB;
+    const extraRush = this.shell === 'blitz' && baseDB > 1 ? 1 : 0;
+    const dlCount = baseDL + extraRush;
+    const lbCount = baseLB;
+    const dbCount = baseDB - extraRush;
+    const dlXs = Array.from({ length: dlCount }, (_, i) => (i - (dlCount - 1) / 2) * 3.5);
     for (let i = 0; i < dlCount; i++) {
       const dl = this.mk(id++, 'def', 'dl', 0, dlXs[i] ?? 0, los + 1.9 * dir);
       dl.speed = (c.practice ? 5.0 : 5.8) * defBoost;
@@ -672,8 +693,21 @@ export class GameEngine {
       this.players.push(dl);
     }
 
+    const lbXs = Array.from({ length: lbCount }, (_, i) => (i - (lbCount - 1) / 2) * 4.4);
+    for (let i = 0; i < lbCount; i++) {
+      const x = lbXs[i];
+      const lb = this.mk(id++, 'def', 'db', 0, x, los + 4.3 * dir);
+      lb.speed = (c.practice ? 5.3 : 6.2) * defBoost;
+      lb.chaseSpeed = (c.practice ? 5.8 : 6.9) * defBoost;
+      lb.state = 'cover';
+      lb.role = 'zone';
+      lb.cover = 'zone';
+      lb.zx = x;
+      lb.zy = los + 6.5 * dir;
+      this.players.push(lb);
+    }
+
     const wrs = this.players.filter((p) => p.kind === 'wr');
-    const dbCount = Math.max(1, c.db - extraRush);
     const byOutside = [...wrs].sort((a, b) => Math.abs(b.x) - Math.abs(a.x));
     for (let i = 0; i < dbCount; i++) {
       const db = this.mk(id++, 'def', 'db', 0, 0, los + 2 * dir);
@@ -684,6 +718,11 @@ export class GameEngine {
       this.players.push(db);
 
       const assignMan = (idx: number) => {
+        if (byOutside.length === 0) {
+          db.role = 'zone'; db.cover = 'zone'; db.zx = 0;
+          db.zy = los + 6 * dir; db.x = 0; db.y = los + 4 * dir;
+          return;
+        }
         const t = byOutside[idx % byOutside.length];
         db.assignment = t.id;
         db.role = 'man';
@@ -703,7 +742,7 @@ export class GameEngine {
       } else {
         if (i < 3) { db.role = 'deep'; db.cover = 'zone'; db.zx = i === 0 ? -17 : i === 1 ? 0 : 17; db.zy = los + 20 * dir; db.x = db.zx * 0.8; db.y = los + 10 * dir; }
         else if (i < 5) { db.role = 'zone'; db.cover = 'zone'; db.zx = i === 3 ? -9 : 9; db.zy = los + 8 * dir; db.x = db.zx; db.y = los + 5 * dir; }
-        else { db.role = 'zone'; db.cover = 'zone'; db.zx = 0; db.zy = los + 6 * dir; db.x = 0; db.y = los + 6 * dir; }
+        else assignMan(i - 5);
       }
       db.x = clamp(db.x, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
     }
@@ -1323,7 +1362,7 @@ export class GameEngine {
   private handleKey(e: KeyboardEvent, down: boolean) {
     const raw = e.key.toLowerCase();
     const k = raw === ' ' ? 'space' : raw;
-    if (down && (['space', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k) || (k === 'tab' && !this.paused && (this.phase === 'play' || this.phase === 'presnap')))) e.preventDefault();
+    if (down && ['space', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
     this.keys[k] = down;
     this.sprinting = !!this.keys['shift'];
     if (!down || this.destroyed) return;
@@ -1334,7 +1373,18 @@ export class GameEngine {
     if (this.paused) return;
     audio.ensure();
 
-    if (k === 'tab' && this.cpuOffense && (this.phase === 'play' || this.phase === 'presnap')) { this.switchDefender(); return; }
+    if (k === 'q' && this.cpuOffense && (this.phase === 'play' || this.phase === 'presnap')) {
+      if (!e.repeat) this.switchDefender();
+      return;
+    }
+    if (k === 'f' && this.cpuOffense && this.phase === 'presnap') {
+      if (!e.repeat) this.cycleDefenseFormation();
+      return;
+    }
+    if (k === 'space' && this.cpuOffense && this.phase === 'play' && this.play === 'air' && this.ball.state === 'air') {
+      if (!e.repeat) this.trySwatPass();
+      return;
+    }
 
     if (this.phase === 'banner' && (k === 'space' || k === 'enter')) {
       if (this.banner && this.banner.t > 0.5) this.bannerDone();
@@ -1409,7 +1459,7 @@ export class GameEngine {
 
   snap() {
     if (this.phase !== 'presnap') return;
-    if (!this.cpuOffense) playRandomQbCall();
+    playRandomQbCall(audio.muted);
     audio.ensure();
     audio.hut(2);
     audio.snap();
@@ -1777,6 +1827,36 @@ export class GameEngine {
     returner.route = []; returner.ri = 0;
   }
 
+  private cycleDefenseFormation() {
+    const current = DEF_FRONT_OPTIONS.indexOf(this.defenseFormation);
+    this.defenseFormation = DEF_FRONT_OPTIONS[(current + 1) % DEF_FRONT_OPTIONS.length];
+    this.setupPlay();
+    this.switchDefender(true);
+    this.phase = 'presnap';
+    this.presnapT = 0;
+    this.setTicker(`DEFENSE: ${this.defenseFormation} — press F to change`);
+  }
+
+  private trySwatPass() {
+    const b = this.ball;
+    if (this.play !== 'air' || b.state !== 'air' || !this.cpuOffense) return;
+    const defender = this.players.find((p) =>
+      p.side === 'def' && p.ctrl && p.state !== 'down' && p.state !== 'tackled' && p.state !== 'whiff',
+    );
+    if (!defender || dist(defender.x, defender.y, b.x, b.y) > 4.5) return;
+    defender.anim = 'catch';
+    defender.armT = 0.3;
+    if (Math.random() >= 0.3) {
+      this.fx.popup(defender.x, defender.y, 'MISSED SWAT', '#ffd94d', 6);
+      return;
+    }
+    this.stats.breakups++;
+    this.fx.popup(defender.x, defender.y, 'SWATTED!', '#4dd8ff', 7);
+    this.fx.puff(b.x, b.y);
+    audio.ooh();
+    this.endPlay('inc', b.tx, b.ty, 0.4);
+  }
+
   switchDefender(nearest = false) {
     if (!this.cpuOffense) return;
     const defenders = this.players.filter(p => p.side === 'def' && p.state !== 'down' && p.state !== 'tackled');
@@ -1827,7 +1907,7 @@ export class GameEngine {
     this.ball.state = 'held'; this.ball.x = returner.x; this.ball.y = returner.y; this.ball.z = 1;
     this.phase = 'play'; this.play = 'run'; this.playT = 0; this.deadT = 0;
     this.cam.tx = returner.x; this.cam.ty = returner.y - 8;
-    this.setTicker('COVER THE KICK - TAB SWITCH DEFENDER');
+    this.setTicker('COVER THE KICK - Q SWITCH DEFENDER');
   }
 
   private beginCpuPossession(spot: number) {
@@ -1847,7 +1927,7 @@ export class GameEngine {
     this.setupPlay();
     this.switchDefender(true);
     this.phase = 'presnap'; this.presnapT = 0;
-    this.setTicker('DEFEND - TAB SWITCH DEFENDER');
+    this.setTicker('DEFEND - Q SWITCH DEFENDER');
   }
 
   private updateCpuOffense() {
@@ -2266,8 +2346,8 @@ export class GameEngine {
       b.y = lerp(b.sy, b.ty, k);
       b.z = 1.4 + b.h * 4 * k * (1 - k);
       b.spin += dt * 16;
-      this.cam.tx = b.tx * 0.9;
-      this.cam.ty = lerp(b.sy, b.ty, k) + 2;
+      this.cam.tx = b.x;
+      this.cam.ty = b.y + this.offDir * 4;
       const wr = b.wrId >= 0 ? this.players[b.wrId] : null;
       if (wr && !wr.ctrl && (wr.state === 'seek' || wr.state === 'route')) {
         // For a number-key pass, leave the receiver on his assigned route.
@@ -2372,13 +2452,13 @@ export class GameEngine {
     if (car && this.play === 'run' && car.state !== 'tackled') {
       if (car.ctrl) {
         this.driveEntity(car, dt, car.speed);
-        this.cam.tx = car.x * 0.85;
-        this.cam.ty = car.y + 8;
+        this.cam.tx = car.x;
+        this.cam.ty = car.y + this.offDir * 5;
         this.checkRunState();
       } else if (this.cpuOffense) {
         this.aiCarrier(car, dt);
-        this.cam.tx = car.x * 0.85;
-        this.cam.ty = car.y + 8 * this.offDir;
+        this.cam.tx = car.x;
+        this.cam.ty = car.y + this.offDir * 5;
         this.checkRunState();
       } else {
         const autoSpeed = 3.4;
@@ -2399,8 +2479,8 @@ export class GameEngine {
         car.x = clamp(car.x + car.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
         car.y += car.vy * dt;
         if (Math.hypot(car.vx, car.vy) > 0.6) car.face = Math.atan2(car.vy, car.vx);
-        this.cam.tx = car.x * 0.85;
-        this.cam.ty = car.y + 8;
+        this.cam.tx = car.x;
+        this.cam.ty = car.y + this.offDir * 5;
         this.checkRunState();
       }
     } else if (this.play === 'qb') {
@@ -2414,7 +2494,7 @@ export class GameEngine {
         if (p.side !== 'def' || p.stun > 0 || p.state === 'down' || p.state === 'whiff') continue;
         if (dist(p.x, p.y, qb.x, qb.y) < 1.05) { this.sack(p, qb); return; }
       }
-      this.cam.tx = qb.x * 0.4;
+      this.cam.tx = qb.x;
       this.cam.ty = this.los + this.offDir * 8 + (this.cpuOffense ? 0 : Math.max(0, this.deepestWR() - this.los) * 0.32);
     }
 
@@ -2622,20 +2702,30 @@ export class GameEngine {
   private runRunBlocker(p: PlayerEnt, dt: number) {
     const carrier = this.carrier();
     if (!carrier || p.id === carrier.id) return;
-    let defender = p.assignment >= 0 ? this.players[p.assignment] : undefined;
-    if (!defender || defender.side !== 'def' || defender.state === 'down' || defender.state === 'tackled') {
-      defender = this.players.filter((d) => d.side === 'def' && d.state !== 'down' && d.state !== 'tackled')
-        .sort((a, b) => dist(a.x, a.y, carrier.x, carrier.y) - dist(b.x, b.y, carrier.x, carrier.y))[0];
+    const dir = this.offDir;
+    const laneX = this.runPlayActive ? this.runLaneX : carrier.x;
+    const canBlock = (d: PlayerEnt) => d.side === 'def' && d.state !== 'down' && d.state !== 'tackled' && d.state !== 'whiff';
+    let defender = this.players.find((d) => d.id === p.assignment && canBlock(d));
+    if (!defender) {
+      const threats = this.players.filter(canBlock);
+      defender = threats.sort((a, b) => {
+        const score = (d: PlayerEnt) => dist(p.x, p.y, d.x, d.y) + Math.abs(d.x - laneX) * 0.28 + Math.max(0, -((d.y - carrier.y) * dir) - 1) * 0.65;
+        return score(a) - score(b);
+      })[0];
+      if (defender) p.assignment = defender.id;
     }
-    if (!defender) { this.steer(p, p.zx, p.zy, p.speed, dt, 9); return; }
-    const targetX = lerp(defender.x, carrier.x, 0.35);
-    const targetY = lerp(defender.y, carrier.y, 0.35);
-    this.steer(p, targetX, targetY, p.speed, dt, 9);
-    if (dist(p.x, p.y, defender.x, defender.y) < p.radius + defender.radius + 0.35) {
-      defender.stun = Math.max(defender.stun, 0.14);
-      const away = Math.atan2(defender.y - p.y, defender.x - p.x);
-      defender.vx += Math.cos(away) * 1.1;
-      defender.vy += Math.sin(away) * 1.1;
+    if (!defender) {
+      const escortX = clamp(laneX + (p.x - laneX) * 0.3, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+      this.steer(p, escortX, carrier.y + dir * 3, Math.max(p.speed, 4.2), dt, 8);
+      return;
+    }
+    this.steer(p, defender.x, defender.y, Math.max(p.speed, 4.4), dt, 10);
+    const contact = p.radius + defender.radius + 0.45;
+    if (dist(p.x, p.y, defender.x, defender.y) < contact && defender.stun <= 0) {
+      defender.stun = 0.35;
+      const side = Math.sign(defender.x - laneX) || Math.sign(defender.x - p.x) || 1;
+      defender.vx += side * 1.2;
+      defender.vy += dir * 1.1;
     }
   }
 
@@ -2668,15 +2758,38 @@ export class GameEngine {
   }
 
   private runOL(p: PlayerEnt, dt: number) {
-    let near: PlayerEnt | null = null;
-    let nd = 3.4;
-    for (const d of this.players) {
-      if (d.kind !== 'dl' || d.stun > 0) continue;
-      const dd = dist(p.x, p.y, d.x, d.y);
-      if (dd < nd) { nd = dd; near = d; }
+    const carrier = this.play === 'run' ? this.carrier() : null;
+    if (!carrier) {
+      const near = this.players.filter((d) => d.side === 'def' && d.kind === 'dl' && d.state !== 'down' && d.state !== 'tackled' && d.state !== 'whiff')
+        .sort((a, b) => dist(p.x, p.y, a.x, a.y) - dist(p.x, p.y, b.x, b.y))[0];
+      if (near) this.steer(p, near.x, near.y, 4.4, dt, 8);
+      return;
     }
-    if (near) this.steer(p, near.x, Math.min(this.los + 1.2, near.y), 4.4, dt, 8);
-    else if (this.play === 'run' && this.carrier()) this.steer(p, this.los + 3 + p.slot, p.y, 4, dt, 6);
+    const dir = this.offDir;
+    const laneX = this.runPlayActive ? this.runLaneX : carrier.x;
+    const canBlock = (d: PlayerEnt) => d.side === 'def' && d.state !== 'down' && d.state !== 'tackled' && d.state !== 'whiff';
+    let target = this.players.find((d) => d.id === p.assignment && canBlock(d) && dist(d.x, d.y, carrier.x, carrier.y) < 20);
+    if (!target) {
+      const threats = this.players.filter(canBlock);
+      target = threats.sort((a, b) => {
+        const score = (d: PlayerEnt) => dist(p.x, p.y, d.x, d.y) + Math.abs(d.x - laneX) * 0.2 + Math.max(0, -((d.y - carrier.y) * dir) - 2) * 0.7;
+        return score(a) - score(b);
+      })[0];
+      if (target) p.assignment = target.id;
+    }
+    if (!target) {
+      const escortX = clamp(laneX + clamp((p.x - laneX) * 0.4, -3, 3), -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+      this.steer(p, escortX, carrier.y + dir * 2.5, Math.max(3.8, p.speed), dt, 7);
+      return;
+    }
+    this.steer(p, target.x, target.y, Math.max(4.4, p.speed), dt, 9);
+    const contact = p.radius + target.radius + 0.45;
+    if (dist(p.x, p.y, target.x, target.y) < contact && target.stun <= 0) {
+      target.stun = 0.32;
+      const side = Math.sign(target.x - laneX) || Math.sign(target.x - p.x) || 1;
+      target.vx += side * 1.2;
+      target.vy += dir * 1.0;
+    }
   }
 
   private runRusher(p: PlayerEnt, dt: number) {
