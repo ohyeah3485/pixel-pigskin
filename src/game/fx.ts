@@ -89,6 +89,19 @@ export class Fx {
     }
   }
 
+  fireworks(x: number, y: number, colors: string[]) {
+    for (let burst = 0; burst < 3; burst++) {
+      const cx = x + (burst - 1) * 6;
+      for (let i = 0; i < 32; i++) {
+        const angle = (i / 32) * Math.PI * 2;
+        const speed = 3 + Math.random() * 5;
+        this.spawn(cx, y, 7 + burst * 2, Math.cos(angle) * speed, Math.sin(angle) * speed,
+          (Math.random() - 0.25) * 6, 0.7 + Math.random() * 0.5, 2.4,
+          colors[i % colors.length], -4, 0.98, 1);
+      }
+    }
+  }
+
   sweat(x: number, y: number, dir: number) {
     this.spawn(x - dir * 0.8, y, 1.5, -dir * (2 + Math.random() * 2), (Math.random() - 0.5) * 3,
       4 + Math.random() * 3, 0.3, 1.4, '#bfe6ff', -16, 0.95);

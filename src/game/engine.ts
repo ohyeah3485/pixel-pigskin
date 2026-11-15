@@ -1,15 +1,29 @@
 import { audio } from './audio';
+import { playRandomQbCall } from './qbAudio';
 import { Fx } from './fx';
 import { MODES, Mods, ModeCfg, ModeId, FinalStats, DrillSide, Shell, SHELL_NAME } from './types';
 import { Team, getTeam, randomOpponent } from './teams';
 import { renderAll } from './render';
 
 export const FIELD_HALF_W = 26.65;
+export const FIELD_LENGTH = 120;
+export const ENDZONE_DEPTH = 10;
+
+type DefFront = '4-3' | '3-4' | 'Nickel' | 'Dime' | 'Goal Line';
+
+const DEF_FRONT_OPTIONS: DefFront[] = ['4-3', '3-4', 'Nickel', 'Dime', 'Goal Line'];
+const DEF_FRONT_PERSONNEL: Record<DefFront, { dl: number; lb: number; db: number }> = {
+  '4-3': { dl: 4, lb: 3, db: 4 },
+  '3-4': { dl: 3, lb: 4, db: 4 },
+  Nickel: { dl: 4, lb: 2, db: 5 },
+  Dime: { dl: 4, lb: 1, db: 6 },
+  'Goal Line': { dl: 5, lb: 4, db: 2 },
+};
 
 export type Phase = 'boot' | 'presnap' | 'fourth' | 'play' | 'kick' | 'conv' | 'banner' | 'over';
 export type Play = 'qb' | 'air' | 'run' | 'dead';
 export type DeadResult = 'none' | 'tackle' | 'oob' | 'inc' | 'sack' | 'int' | 'td' | 'whistle' | 'breakup';
-export type KickKind = 'xp' | 'fg';
+export type KickKind = 'xp' | 'fg' | 'kickoff' | 'punt';
 
 export interface PlayerEnt {
   id: number;
@@ -101,13 +115,20 @@ interface Banner {
 
 export interface KickState {
   kind: KickKind;
-  sub: 'sweep' | 'runup' | 'flight' | 'result';
+  sub: 'choose' | 'sweep' | 'runup' | 'flight' | 'result';
   t: number; arrow: number; dir: number;
   acc: number; good: boolean; doink: boolean;
   ballT: number;
   points: number;
   distance: number;
   window: number;
+  startY: number;
+  endY: number;
+  returnSpot: number;
+  returnToPlayer?: boolean;
+  kickerSide?: 'off' | 'def';
+  targetX?: number;
+  returnLane?: -1 | 0 | 1;
 }
 
 /** a running tackle animation */
@@ -132,6 +153,12 @@ const pick = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
 
 interface PlayCall { name: string; routes: string[]; }
 
+const RUN_CALLS = [
+  { name: 'HB DIVE', backX: 2.2, laneX: 0 },
+  { name: 'OUTSIDE ZONE', backX: 4.5, laneX: 7 },
+  { name: 'COUNTER', backX: -3.5, laneX: -6 },
+] as const;
+
 const SEASON_PLAYS_5: PlayCall[] = [
   { name: 'TRIPS FLOOD', routes: ['go', 'slant', 'post', 'out', 'flat'] },
   { name: 'DAGGER', routes: ['go', 'dig', 'post', 'flat', 'wheel'] },
@@ -141,6 +168,10 @@ const SEASON_PLAYS_5: PlayCall[] = [
   { name: 'QUICK GAME', routes: ['slant', 'out', 'post', 'curl', 'flat'] },
   { name: 'HB SCREEN', routes: ['go', 'slant', 'go', 'out', 'flat'] },
   { name: 'HB WHEEL', routes: ['post', 'curl', 'go', 'slant', 'wheel'] },
+  { name: 'MESH', routes: ['slant', 'in', 'flat', 'slant', 'go'] },
+  { name: 'STICK', routes: ['out', 'curl', 'flat', 'go', 'slant'] },
+  { name: 'FOUR VERTS', routes: ['go', 'go', 'post', 'wheel', 'go'] },
+  { name: 'CURL-FLAT', routes: ['curl', 'flat', 'out', 'go', 'slant'] },
 ];
 
 const SEASON_PLAYS_6: PlayCall[] = [
@@ -227,6 +258,7 @@ export class GameEngine {
   qbThrowT = 0;
 
   shell: Shell = 'man';
+  defenseFormation: DefFront = 'Nickel';
   shellRevealT = 0;
 
   los = 25;
@@ -291,10 +323,42 @@ export class GameEngine {
   ui: UIButton[] = [];
   banner: Banner | null = null;
   kick: KickState = {
-    kind: 'xp', sub: 'sweep', t: 0, arrow: 0, dir: 1, acc: 0,
-    good: false, doink: false, ballT: 0, points: 1, distance: 20, window: 0.16,
+    kind: 'xp',
+    sub: 'sweep',
+    t: 0,
+    arrow: 0,
+    dir: 1,
+    acc: 0,
+    good: false,
+    doink: false,
+    ballT: 0,
+    points: 1,
+    distance: 20,
+    window: 0.16,
+    startY: FIELD_LENGTH - 3,
+    endY: FIELD_LENGTH + ENDZONE_DEPTH,
+    returnSpot: 0,
+    kickerSide: 'off',
   };
   tackleAnim: TackleAnim | null = null;
+  kickReturnActive = false;
+  cpuOffense = false;
+  private cpuKickReturn = false;
+  runSelected = false;
+  private offDir: 1 | -1 = 1;
+  private runCallIndex = 0;
+  private runLaneX = 0;
+  private handoffT = 0;
+  private handoffFromX = 0;
+  private handoffFromY = 0;
+  private handoffToX = 0;
+  private handoffToY = 0;
+  private handoffBackId = -1;
+  private readonly handoffDuration = 0.28;
+  private truckCooldown = 0;
+  get selectedRunName() { return RUN_CALLS[this.runCallIndex].name; }
+  get handoffInProgress() { return this.handoffT > 0; }
+  private runPlayActive = false;
 
   time = 0;
   playT = 0;
@@ -393,8 +457,8 @@ export class GameEngine {
   get camBias() { return 0.28; }
 
   /** downfield yards visible to the left / right of the focus */
-  camYMin() { return -12 + (this.vw * this.camBias) / this.S; }
-  camYMax() { return 112 - (this.vw * (1 - this.camBias)) / this.S; }
+  camYMin() { return -ENDZONE_DEPTH - 2 + (this.vw * this.camBias) / this.S; }
+  camYMax() { return FIELD_LENGTH + ENDZONE_DEPTH + 2 - (this.vw * (1 - this.camBias)) / this.S; }
   clampCamY(y: number) {
     const a = this.camYMin();
     const b = this.camYMax();
@@ -407,6 +471,29 @@ export class GameEngine {
   clampCamX(x: number) {
     const l = this.camXLimit();
     return clamp(x, -l, l);
+  }
+
+  private framePresnap() {
+    let minX = Math.min(0, this.ball.x), maxX = Math.max(0, this.ball.x);
+    let minY = Math.min(this.los, this.ball.y), maxY = Math.max(this.los, this.ball.y);
+    const include = (x: number, y: number) => {
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    };
+    for (const p of this.players) {
+      include(p.x, p.y);
+      if (p.kind === 'wr') for (const point of p.route) include(point.x, point.y);
+    }
+    // Account for sprites and the top scoreboard / bottom play-call panel.
+    minX -= 2.5; maxX += 2.5; minY -= 3; maxY += 3;
+    const left = 24, right = this.vw - 24;
+    const top = 150, bottom = this.vh - (this.cfg.drill || this.cpuOffense ? 75 : 140);
+    const zoom = Math.min(1.15, (right - left) / ((maxY - minY) * this.S),
+      (bottom - top) / ((maxX - minX) * this.S));
+    this.cam.tzoom = Math.max(0.1, zoom);
+    const scale = this.S * this.cam.tzoom;
+    this.cam.ty = (minY + maxY) / 2 - ((left + right) / 2 - this.vw * this.camBias) / scale;
+    this.cam.tx = (minX + maxX) / 2 - ((top + bottom) / 2 - this.vh / 2) / scale;
   }
 
   // ---------------- lifecycle ----------------
@@ -448,6 +535,14 @@ export class GameEngine {
     this.drillOpp = 0;
     this.carryStam = [1, 1];
     this.tackleAnim = null;
+    this.kickReturnActive = false;
+    this.cpuOffense = false;
+    this.cpuKickReturn = false;
+    this.offDir = 1;
+    this.handoffT = 0;
+    this.truckCooldown = 0;
+    this.runSelected = false;
+    this.runPlayActive = false;
     this.tickerMsg = `${this.team.city.toUpperCase()} ${this.team.name.toUpperCase()} VS ${this.opp.city.toUpperCase()} ${this.opp.name.toUpperCase()}`;
     audio.ensure();
     audio.setCrowd(0.55);
@@ -468,13 +563,42 @@ export class GameEngine {
       ], 2.2, false, () => { this.phase = 'presnap'; this.presnapT = 0; });
     } else {
       const possession = this.cfg.drives > 0;
+      const openingKickoff = this.cfg.specialTeams && !this.cfg.practice;
+
       const lines: BannerLine[] = [
-        { txt: `${this.team.abbr}  VS  ${this.opp.abbr}`, col: this.team.c1 === '#000000' ? '#eaffea' : this.team.c1, size: 16 },
-        { txt: possession ? `DRIVE 1 OF ${this.cfg.drives * 2}` : `${this.cfg.name} - YOUR BALL`, col: '#eaffea', size: 9 },
+        {
+          txt: `${this.team.abbr}  VS  ${this.opp.abbr}`,
+          col: this.team.c1 === '#000000' ? '#eaffea' : this.team.c1,
+          size: 16,
+        },
+        {
+          txt: openingKickoff
+            ? 'OPENING KICKOFF - YOU RETURN'
+            : possession
+              ? `DRIVE 1 OF ${this.cfg.drives * 2}`
+              : `${this.cfg.name} - YOUR BALL`,
+          col: '#eaffea',
+          size: 9,
+        },
       ];
-      if (!possession) lines.push({ txt: `OPP RATING ${Math.round((this.opp.off + this.opp.def) / 2)}`, col: '#ffd94d', size: 8 });
+
+      if (!possession) {
+        lines.push({
+          txt: `OPP RATING ${Math.round((this.opp.off + this.opp.def) / 2)}`,
+          col: '#ffd94d',
+          size: 8,
+        });
+      }
+
       this.setupPlay();
-      this.showBanner(lines, 1.8, false, () => { this.phase = 'presnap'; this.presnapT = 0; });
+      this.showBanner(lines, 1.8, false, () => {
+        if (openingKickoff) {
+          this.beginKickoffSequence(true);
+        } else {
+          this.phase = 'presnap';
+          this.presnapT = 0;
+        }
+      });
     }
     this.phase = 'banner';
     this.running = true;
@@ -513,11 +637,11 @@ export class GameEngine {
   /** the team currently on offense */
   offTeam(): Team {
     if (this.cfg.id === 'two2') return this.cur2P === 0 ? this.team : this.team2;
-    return this.team;
+    return this.cpuOffense ? this.opp : this.team;
   }
   defTeam(): Team {
     if (this.cfg.id === 'two2') return this.cur2P === 0 ? this.team2 : this.team;
-    return this.opp;
+    return this.cpuOffense ? this.team : this.opp;
   }
   /** 0.9 - 1.1 speed scalar from a rating */
   private ratingMul(r: number) { return 0.9 + ((r - 55) / 44) * 0.2; }
@@ -539,7 +663,8 @@ export class GameEngine {
     this.players = [];
     this.resetPlayState();
     const los = convFrom !== undefined ? convFrom : this.los;
-    if (convFrom !== undefined) { this.los = convFrom; this.ltg = 100; this.down = 1; }
+    const dir = this.offDir;
+    if (convFrom !== undefined) { this.los = convFrom; this.ltg = dir > 0 ? FIELD_LENGTH : 0; this.down = 1; }
 
     let id = 0;
     const oT = this.offTeam();
@@ -549,13 +674,13 @@ export class GameEngine {
     this.shell = this.callShell();
     this.shellRevealT = 0;
 
-    const qb = this.mk(id++, 'off', 'qb', 0, 0, los - 5);
+    const qb = this.mk(id++, 'off', 'qb', 0, 0, los - 5 * dir);
     qb.speed = 6.5 * offSpeed;
     qb.isQB = true;
     this.qbId = qb.id;
     this.players.push(qb);
     for (let i = -1; i <= 1; i++) {
-      const ol = this.mk(id++, 'off', 'ol', 0, i * 2.6, los - 0.4);
+      const ol = this.mk(id++, 'off', 'ol', 0, i * 2.6, los - 0.4 * dir);
       ol.speed = 5.2;
       this.players.push(ol);
     }
@@ -564,20 +689,28 @@ export class GameEngine {
     xs.forEach((sx, i) => {
       const isRB = c.wr === 5 && i === 4;
       const pxx = isRB ? 7 : sx;
-      const pyy = isRB ? los - 6.5 : los - 0.2;
+      const pyy = isRB ? los - 6.5 * dir : los - 0.2 * dir;
       const wr = this.mk(id++, 'off', 'wr', i + 1, pxx, pyy);
       wr.speed = (6.8 + Math.random() * 0.5) * offSpeed;
       const rname = play?.routes[i] ?? (isRB ? 'flat' : pick(ROUTE_NAMES));
-      wr.route = buildRoute(rname, pxx, los);
+      wr.route = buildRoute(rname, pxx, los).map((pt) => ({ ...pt, y: los + (pt.y - los) * dir }));
       wr.state = 'route';
       this.players.push(wr);
     });
 
-    const extraRush = this.shell === 'blitz' ? 1 : 0;
-    const dlCount = c.dl + extraRush;
-    const dlXs = dlCount === 1 ? [0] : dlCount === 2 ? [-3.4, 3.4] : [-4.6, 0, 4.6];
+    const offenseCount = Math.max(1, this.players.filter((p) => p.side === 'off').length);
+    const personnel = DEF_FRONT_PERSONNEL[this.defenseFormation];
+    const scale = offenseCount / 11;
+    const baseDL = Math.min(offenseCount, Math.max(1, Math.round(personnel.dl * scale)));
+    const baseLB = Math.min(offenseCount - baseDL, Math.max(0, Math.round(personnel.lb * scale)));
+    const baseDB = offenseCount - baseDL - baseLB;
+    const extraRush = this.shell === 'blitz' && baseDB > 1 ? 1 : 0;
+    const dlCount = baseDL + extraRush;
+    const lbCount = baseLB;
+    const dbCount = baseDB - extraRush;
+    const dlXs = Array.from({ length: dlCount }, (_, i) => (i - (dlCount - 1) / 2) * 3.5);
     for (let i = 0; i < dlCount; i++) {
-      const dl = this.mk(id++, 'def', 'dl', 0, dlXs[i] ?? 0, los + 1.9);
+      const dl = this.mk(id++, 'def', 'dl', 0, dlXs[i] ?? 0, los + 1.9 * dir);
       dl.speed = (c.practice ? 5.0 : 5.8) * defBoost;
       dl.chaseSpeed = (c.practice ? 5.4 : 6.6) * defBoost;
       dl.move = pick(['speed', 'bull', 'inside']);
@@ -586,11 +719,24 @@ export class GameEngine {
       this.players.push(dl);
     }
 
+    const lbXs = Array.from({ length: lbCount }, (_, i) => (i - (lbCount - 1) / 2) * 4.4);
+    for (let i = 0; i < lbCount; i++) {
+      const x = lbXs[i];
+      const lb = this.mk(id++, 'def', 'db', 0, x, los + 4.3 * dir);
+      lb.speed = (c.practice ? 5.3 : 6.2) * defBoost;
+      lb.chaseSpeed = (c.practice ? 5.8 : 6.9) * defBoost;
+      lb.state = 'cover';
+      lb.role = 'zone';
+      lb.cover = 'zone';
+      lb.zx = x;
+      lb.zy = los + 6.5 * dir;
+      this.players.push(lb);
+    }
+
     const wrs = this.players.filter((p) => p.kind === 'wr');
-    const dbCount = Math.max(1, c.db - extraRush);
     const byOutside = [...wrs].sort((a, b) => Math.abs(b.x) - Math.abs(a.x));
     for (let i = 0; i < dbCount; i++) {
-      const db = this.mk(id++, 'def', 'db', 0, 0, los + 2);
+      const db = this.mk(id++, 'def', 'db', 0, 0, los + 2 * dir);
       const hips = c.practice ? rand(0.8, 0.92) : rand(0.95, 1.06);
       db.speed = 7.3 * hips * defBoost * (c.practice ? 0.88 : 1);
       db.chaseSpeed = (c.practice ? 5.6 : 7.5) * defBoost;
@@ -598,6 +744,11 @@ export class GameEngine {
       this.players.push(db);
 
       const assignMan = (idx: number) => {
+        if (byOutside.length === 0) {
+          db.role = 'zone'; db.cover = 'zone'; db.zx = 0;
+          db.zy = los + 6 * dir; db.x = 0; db.y = los + 4 * dir;
+          return;
+        }
         const t = byOutside[idx % byOutside.length];
         db.assignment = t.id;
         db.role = 'man';
@@ -607,17 +758,17 @@ export class GameEngine {
         db.leverage = t.x >= 0 ? 1 : -1;
         db.t = 0;
         db.x = t.x + db.leverage * 0.5;
-        db.y = los + (db.press ? 1.2 : rand(4.5, 6.5));
+        db.y = los + (db.press ? 1.2 : rand(4.5, 6.5)) * dir;
       };
       if (this.shell === 'man' || this.shell === 'blitz') assignMan(i);
       else if (this.shell === 'cover2') {
-        if (i < 2) { db.role = 'deep'; db.cover = 'zone'; db.zx = i === 0 ? -13 : 13; db.zy = los + 22; db.x = db.zx * 0.75; db.y = los + 11; db.speed *= 1.02; }
-        else if (i < 4) { db.role = 'zone'; db.cover = 'zone'; db.zx = i === 2 ? -11 : 11; db.zy = los + 7; db.x = db.zx; db.y = los + 4; }
+        if (i < 2) { db.role = 'deep'; db.cover = 'zone'; db.zx = i === 0 ? -13 : 13; db.zy = los + 22 * dir; db.x = db.zx * 0.75; db.y = los + 11 * dir; db.speed *= 1.02; }
+        else if (i < 4) { db.role = 'zone'; db.cover = 'zone'; db.zx = i === 2 ? -11 : 11; db.zy = los + 7 * dir; db.x = db.zx; db.y = los + 4 * dir; }
         else assignMan(i - 4);
       } else {
-        if (i < 3) { db.role = 'deep'; db.cover = 'zone'; db.zx = i === 0 ? -17 : i === 1 ? 0 : 17; db.zy = los + 20; db.x = db.zx * 0.8; db.y = los + 10; }
-        else if (i < 5) { db.role = 'zone'; db.cover = 'zone'; db.zx = i === 3 ? -9 : 9; db.zy = los + 8; db.x = db.zx; db.y = los + 5; }
-        else { db.role = 'zone'; db.cover = 'zone'; db.zx = 0; db.zy = los + 6; db.x = 0; db.y = los + 6; }
+        if (i < 3) { db.role = 'deep'; db.cover = 'zone'; db.zx = i === 0 ? -17 : i === 1 ? 0 : 17; db.zy = los + 20 * dir; db.x = db.zx * 0.8; db.y = los + 10 * dir; }
+        else if (i < 5) { db.role = 'zone'; db.cover = 'zone'; db.zx = i === 3 ? -9 : 9; db.zy = los + 8 * dir; db.x = db.zx; db.y = los + 5 * dir; }
+        else assignMan(i - 5);
       }
       db.x = clamp(db.x, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
     }
@@ -632,7 +783,7 @@ export class GameEngine {
     this.ball.x = 0; this.ball.y = los; this.ball.z = 1;
     this.play = 'qb';
     this.playT = 0;
-    this.cam.ty = this.clampCamY(los + 4);
+    this.cam.ty = this.clampCamY(los + 4 * dir);
     this.cam.tx = 0;
     this.cam.tzoom = 1;
   }
@@ -641,7 +792,7 @@ export class GameEngine {
     this.players = [];
     this.resetPlayState();
     this.los = 30;
-    this.ltg = 100;
+    this.ltg = FIELD_LENGTH;
     this.down = 1;
     let id = 0;
     const offSpeed = this.mods.turbo ? 1.18 : 1;
@@ -703,6 +854,8 @@ export class GameEngine {
   }
 
   private resetPlayState() {
+    this.runPlayActive = false;
+    this.handoffT = 0;
     this.forceDrillThrow = false;
     this.aim.active = false;
     this.aim.wrId = -1;
@@ -840,6 +993,81 @@ export class GameEngine {
     return qb ? qb.stam : 1;
   }
 
+  selectRun() {
+    if (this.phase !== 'presnap' || this.cfg.drill || this.cpuOffense) return;
+    if (this.runSelected) this.runCallIndex = (this.runCallIndex + 1) % RUN_CALLS.length;
+    else this.runCallIndex = 0;
+    this.runSelected = true;
+    this.applyRunFormation();
+    this.setTicker(`${this.selectedRunName} SELECTED - SNAP TO HAND OFF`);
+    audio.uiHover();
+  }
+
+  private applyRunFormation() {
+    const backs = this.players.filter((p) => p.side === 'off' && p.kind === 'wr');
+    const back = backs[backs.length - 1];
+    const qb = this.players[this.qbId];
+    if (!back || !qb) return;
+    const call = RUN_CALLS[this.runCallIndex];
+    this.runLaneX = call.laneX;
+    back.x = clamp(qb.x + call.backX, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+    back.y = qb.y - 1.5 * this.offDir;
+    back.vx = 0; back.vy = 0; back.route = []; back.ri = 0; back.state = 'idle';
+    const blockers = this.players.filter((p) => p.side === 'off' && p.id !== back.id && (p.kind === 'ol' || p.kind === 'wr'));
+    const defenders = this.players.filter((p) => p.side === 'def' && p.state !== 'down' && p.state !== 'tackled');
+    blockers.forEach((blocker, i) => {
+      const targetX = clamp(call.laneX + (i - (blockers.length - 1) / 2) * 2.1, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+      const targetY = this.los + 1.3 * this.offDir;
+      const targetDefender = [...defenders].sort((a, b) => dist(a.x, a.y, targetX, targetY) - dist(b.x, b.y, targetX, targetY))[0];
+      blocker.assignment = targetDefender?.id ?? -1;
+      blocker.zx = targetX; blocker.zy = targetY; blocker.route = []; blocker.ri = 0; blocker.state = 'block';
+    });
+  }
+
+  private handoff() {
+    const back = this.players.find((p) => p.id === this.handoffBackId && p.side === 'off');
+    this.handoffBackId = -1;
+    if (!back) {
+      // With no back, turn the play into a safe QB keeper instead of hanging.
+      const qb = this.players.find((p) => p.id === this.qbId && p.side === 'off');
+      if (qb) { this.qbScramble = true; this.runPlayActive = true; this.becomeCarrier(qb); }
+      else this.endPlay('whistle', this.ball.x, this.ball.y);
+      return;
+    }
+    back.route = []; back.ri = 0; back.state = 'idle';
+    back.anim = 'catch'; back.animT = 0; back.armT = 0.25;
+    this.runPlayActive = true;
+    this.becomeCarrier(back);
+    this.ball.state = 'held'; this.ball.x = back.x; this.ball.y = back.y; this.ball.z = 1; this.ball.wrId = -1;
+    this.setTicker('HANDOFF');
+  }
+
+  private startRunHandoff() {
+    const backs = this.players.filter((p) => p.side === 'off' && p.kind === 'wr');
+    const back = backs[backs.length - 1];
+    const qb = this.players.find((p) => p.id === this.qbId && p.side === 'off');
+    this.handoffBackId = back?.id ?? -1;
+    if (!back || !qb) { this.handoffBackId = -1; this.handoff(); return; }
+    this.handoffFromX = qb.x; this.handoffFromY = qb.y;
+    this.handoffToX = back.x; this.handoffToY = back.y;
+    back.vx = 0; back.vy = 0;
+    this.handoffT = this.handoffDuration;
+    this.ball.state = 'held'; this.ball.x = qb.x; this.ball.y = qb.y; this.ball.z = 1; this.ball.wrId = -1;
+  }
+
+  private updateRunHandoff(dt: number) {
+    const back = this.players.find((p) => p.id === this.handoffBackId && p.side === 'off');
+    if (!back) { this.handoffT = 0; this.handoff(); return; }
+    this.handoffT = Math.max(0, this.handoffT - dt);
+    const t = clamp(1 - this.handoffT / this.handoffDuration, 0, 1);
+    back.x = this.handoffToX; back.y = this.handoffToY;
+    this.ball.x = lerp(this.handoffFromX, this.handoffToX, t);
+    this.ball.y = lerp(this.handoffFromY, this.handoffToY, t);
+    this.ball.z = 1 + Math.sin(Math.PI * t) * 1.2;
+    this.cam.tx = this.ball.x; this.cam.ty = this.ball.y + this.offDir * 4;
+    if (this.handoffT <= 0) this.handoff();
+  }
+
   // ---------------- drill + playbook actions ----------------
 
   private syncSeasonPlaybook() {
@@ -849,6 +1077,9 @@ export class GameEngine {
   }
 
   changeSeasonPlay(dir: number) {
+    const wasRun = this.runSelected;
+    this.runSelected = false;
+    if (wasRun) this.setupPlay();
     this.syncSeasonPlaybook();
     this.seasonPlayIdx = (this.seasonPlayIdx + dir + this.seasonPlays.length) % this.seasonPlays.length;
     this.seasonPlayName = this.seasonPlays[this.seasonPlayIdx].name;
@@ -946,7 +1177,19 @@ export class GameEngine {
       if (bx >= b.x && bx <= b.x + b.w && by >= b.y && by <= b.y + b.h) { audio.uiClick(); b.cb(); return; }
     }
     if (this.phase === 'banner') { if (this.banner && this.banner.t > 0.5) this.bannerDone(); return; }
+    if (this.phase === 'kick' && this.kick.kind === 'kickoff') {
+      if (this.kick.sub === 'choose') this.launchKickoff();
+      return;
+    }
     if (this.phase === 'kick') { this.kickStop(); return; }
+    if (this.cpuOffense && (this.phase === 'presnap' || this.phase === 'play')) {
+      if (e.pointerType !== 'mouse') {
+        const [wx, wy] = this.toWorld(e.clientX, e.clientY);
+        this.joy.active = true; this.joy.id = e.pointerId;
+        this.joy.bx = wx; this.joy.by = wy; this.joy.dx = 0; this.joy.dy = 0;
+      }
+      return;
+    }
     if (this.phase === 'presnap' && this.cfg.drill) { this.snap(); return; }
     // auto-snap: pulling back to aim auto-snaps the ball (like Retro Bowl)
     if (this.phase === 'presnap' && !this.cfg.drill) {
@@ -998,7 +1241,7 @@ export class GameEngine {
       py += (wr.vy / sp) * bias * 5.5;
     }
     px = clamp(px, -FIELD_HALF_W + 0.4, FIELD_HALF_W - 0.4);
-    py = clamp(py, this.los - 8, 108.5);
+    py = clamp(py, this.los - 8, FIELD_LENGTH + 8.5);
     return { x: px, y: py, T, d: dist(qb.x, qb.y, px, py) };
   }
 
@@ -1104,7 +1347,7 @@ export class GameEngine {
         const baseDist = 6 + this.aim.power * 36;
         const scale = baseDist / Math.max(0.1, Math.hypot(throwDownfield, throwLateral));
         
-        const rawY = clamp(qb.y + throwDownfield * scale, this.los - 8, 109);
+        const rawY = clamp(qb.y + throwDownfield * scale, this.los - 8, FIELD_LENGTH + 9);
         const rawX = clamp(qb.x + throwLateral   * scale, -FIELD_HALF_W + 0.5, FIELD_HALF_W - 0.5);
 
         this.aim.tx = rawX;
@@ -1165,6 +1408,19 @@ export class GameEngine {
     if (this.paused) return;
     audio.ensure();
 
+    if (k === 'q' && this.cpuOffense && (this.phase === 'play' || this.phase === 'presnap')) {
+      if (!e.repeat) this.switchDefender();
+      return;
+    }
+    if (k === 'f' && this.cpuOffense && this.phase === 'presnap') {
+      if (!e.repeat) this.cycleDefenseFormation();
+      return;
+    }
+    if (k === 'space' && this.cpuOffense && this.phase === 'play' && this.play === 'air' && this.ball.state === 'air') {
+      if (!e.repeat) this.trySwatPass();
+      return;
+    }
+
     if (this.phase === 'banner' && (k === 'space' || k === 'enter')) {
       if (this.banner && this.banner.t > 0.5) this.bannerDone();
       return;
@@ -1176,6 +1432,7 @@ export class GameEngine {
       return;
     }
     if (this.phase === 'presnap') {
+      if (this.cpuOffense) return;
       if (this.cfg.drill) {
         const wr = this.players.find((p) => p.kind === 'wr');
         if (wr && wr.ctrl) {
@@ -1189,23 +1446,39 @@ export class GameEngine {
           }
         }
       } else {
+        if (k === 'r') { this.selectRun(); return; }
         if (k === 'q' || k === '[') { this.changeSeasonPlay(-1); return; }
         if (k === 'e' || k === ']') { this.changeSeasonPlay(1); return; }
       }
       if (k === 'space' || k === 'enter') { this.snap(); return; }
       return;
     }
-    if (this.phase === 'kick' && (k === 'space' || k === 'k' || k === 'enter')) { this.kickStop(); return; }
+    if (this.phase === 'kick') {
+      if (this.kick.kind === 'kickoff') {
+        if (this.kick.sub !== 'choose') return;
+        if (k === '1' || k === 'a' || k === 'arrowleft') this.selectKickoffLane(-1);
+        else if (k === '2' || k === 's' || k === 'arrowdown') this.selectKickoffLane(0);
+        else if (k === '3' || k === 'd' || k === 'arrowright') this.selectKickoffLane(1);
+        else if (k === 'space' || k === 'enter' || k === 'k') this.launchKickoff();
+        return;
+      }
+      if (k === 'space' || k === 'k' || k === 'enter') this.kickStop();
+      return;
+    }
     if (this.phase === 'conv') { this.pickConv(k); return; }
     if (this.phase !== 'play') return;
 
+    if (k === 'space' && this.play === 'run' && !this.cpuOffense && this.carrier()?.ctrl) {
+      if (!e.repeat) this.tryTruck();
+      return;
+    }
     if (this.cfg.drill) {
       if (k === 'f' || k === 'space') this.drillAction(0);
       else if (k === 'p' && this.twoP) this.drillAction(1);
       else if (k === 'r' && !this.twoP) this.endRep('whistle');
       return;
     }
-    if (this.play === 'qb') {
+    if (this.play === 'qb' && !this.cpuOffense) {
       const n = parseInt(k, 10);
       if (n >= 1 && n <= 6) { this.throwToSlot(n); return; }
       if (k === 'space' || k === 'e') { this.startScramble(); return; }
@@ -1224,12 +1497,14 @@ export class GameEngine {
 
   snap() {
     if (this.phase !== 'presnap') return;
+    playRandomQbCall(audio.muted);
     audio.ensure();
     audio.hut(2);
     audio.snap();
     this.phase = 'play';
     this.play = 'qb';
     this.playT = 0;
+    this.cam.tzoom = 1;
     this.shellRevealT = 1.2;
     this.trauma = Math.min(1, this.trauma + 0.1);
     for (const p of this.players) {
@@ -1243,11 +1518,12 @@ export class GameEngine {
       }
     }
     this.setTicker(this.cfg.drill ? `REP ${this.rep + 1} OF ${this.cfg.reps}` : this.downAndDist());
+    if (!this.cfg.drill && this.runSelected) { this.startRunHandoff(); this.runSelected = false; }
   }
 
   throwAt(tx: number, ty: number, wr?: PlayerEnt, keepReceiverOnRoute = false) {
     const qb = this.players[this.qbId];
-    if (!qb || this.play !== 'qb') return;
+    if (!qb || this.play !== 'qb' || this.handoffT > 0) return;
     const d = dist(qb.x, qb.y, tx, ty);
     if (d < 2) return;
     const T = this.flightTime(d);
@@ -1264,7 +1540,7 @@ export class GameEngine {
     b.state = 'air';
     b.sx = qb.x; b.sy = qb.y;
     b.tx = clamp(tx, -FIELD_HALF_W, FIELD_HALF_W);
-    b.ty = clamp(ty, this.los - 6, 109);
+    b.ty = this.offDir > 0 ? clamp(ty, this.los - 6, FIELD_LENGTH + 9) : clamp(ty, -ENDZONE_DEPTH + 1, this.los + 6);
     b.t = 0; b.T = T;
     // height: low power = high lob, high power = flat bullet (matches Retro Bowl feel)
     const powerMul = 1.35 - this.aim.power * 0.7;   // 1.35 (lob) → 0.65 (bullet)
@@ -1273,7 +1549,7 @@ export class GameEngine {
     b.wrId = target ? target.id : -1;
     this.routePassId = keepReceiverOnRoute && target ? target.id : -1;
     this.play = 'air';
-    this.stats.attempts++;
+    if (!this.cpuOffense) this.stats.attempts++;
     this.qbThrowT = 0.35;
     qb.anim = 'throw';
     qb.animT = 0;
@@ -1323,7 +1599,7 @@ export class GameEngine {
 
       if (!wp) {
         tx = x + vx * 0.3;
-        ty = y + 6;
+        ty = y + 6 * this.offDir;
         speed = base * 0.62;
         agility = 4;
       } else {
@@ -1394,12 +1670,16 @@ export class GameEngine {
       flight = this.flightTime(dist(qb.x, qb.y, target.x, target.y));
     }
 
+    if (this.cpuOffense) {
+      target.x += rand(-0.55, 0.55);
+      target.y += rand(-0.75, 0.75);
+    }
     this.aim.power = 0.78;
     this.throwAt(target.x, target.y, wr, true);
   }
 
   startScramble() {
-    if (this.play !== 'qb' || !this.cfg.canScramble || this.cfg.drill) return;
+    if (this.play !== 'qb' || !this.cfg.canScramble || this.cfg.drill || this.handoffT > 0) return;
     const qb = this.players[this.qbId];
     this.qbScramble = true;
     this.becomeCarrier(qb);
@@ -1411,6 +1691,13 @@ export class GameEngine {
     if (prev) prev.isCarrier = false;
     this.carrierId = p.id;
     p.isCarrier = true;
+    if (!this.cfg.drill && !this.cpuOffense && p.side === 'off') {
+      const pad: 0 | 1 = this.cfg.id === 'two2' ? this.cur2P : 0;
+      p.ctrl = true;
+      p.pad = pad;
+      if (pad === 0) { this.ctrlId = p.id; this.ctrlId2 = -1; }
+      else this.ctrlId2 = p.id;
+    }
     if (fromCatch) {
       p.anim = 'catch'; p.animT = 0; p.armT = 0.25;
       p.burst = 0;
@@ -1428,25 +1715,375 @@ export class GameEngine {
 
   // ---------------- special teams ----------------
 
-  fgDistance(): number { return Math.round(100 - this.los + 17); }
+  fgDistance(): number { return Math.round(FIELD_LENGTH - this.los + 17); }
   fgInRange(): boolean { return this.fgDistance() <= 58; }
+
+  private frameKickCamera(startY: number, endY: number) {
+    const span = Math.max(8, Math.abs(endY - startY));
+    const sideMargin = this.landscape ? 72 : 40;
+
+    this.cam.tzoom = clamp(
+      (this.vw - sideMargin * 2) / (span * this.S),
+      0.62,
+      1.08,
+    );
+
+    // Center the kick's start and finish in the downfield screen direction.
+    const screenOffset = (0.5 - this.camBias) * this.vw;
+    this.cam.ty =
+      (startY + endY) / 2 - screenOffset / (this.S * this.cam.tzoom);
+
+    this.cam.tx = 0;
+  }
+
+  private beginKickoffSequence(returnToPlayer: boolean) {
+    // Each team kicks from its own 35 toward the receiving team's 5.
+    const startY = returnToPlayer ? FIELD_LENGTH - 35 : 35;
+    const endY = returnToPlayer ? 5 : FIELD_LENGTH - 5;
+    const kickerSide = 'def' as const;
+    const cpuLane = returnToPlayer ? pick([-1, 0, 1]) : 0;
+
+    this.kick = {
+      kind: 'kickoff', sub: 'choose', t: 0, arrow: 0.5, dir: 1,
+      acc: 0, good: true, doink: false, ballT: 0, points: 0,
+      distance: Math.abs(endY - startY), window: 0, startY, endY,
+      returnSpot: endY, returnToPlayer,
+      kickerSide,
+      targetX: cpuLane * 14, returnLane: 0,
+    };
+    // Prepare the receiving and coverage teams before the kick, for both sides.
+    this.offDir = (-(Math.sign(endY - startY) || 1)) as 1 | -1;
+    this.cpuOffense = !returnToPlayer;
+    this.cpuKickReturn = !returnToPlayer;
+    const zoom = this.cam.zoom, targetZoom = this.cam.tzoom;
+    this.los = endY;
+    this.ltg = clamp(endY + 10 * this.offDir, 0, FIELD_LENGTH);
+    this.down = 1;
+    this.convPlay = false;
+    this.setupPlay();
+    this.cam.zoom = zoom;
+    this.cam.tzoom = targetZoom;
+    this.positionKickReturn(this.kick.targetX ?? 0, this.kick.returnLane ?? 0);
+    this.kickReturnActive = false;
+    this.phase = 'kick';
+    this.play = 'dead';
+    const initialOffset = (0.45 - this.camBias) * this.vw / (this.S * this.cam.zoom);
+    this.cam.tx = 0;
+    this.cam.ty = startY - initialOffset;
+    this.setTicker(returnToPlayer
+      ? 'OPPONENT KICKOFF - PICK A RETURN LANE'
+      : 'KICKOFF - PICK A TARGET');
+  }
+
+  selectKickoffLane(lane: number) {
+    const k = this.kick;
+    if (this.phase !== 'kick' || k.kind !== 'kickoff' || k.sub !== 'choose') return;
+    const selected: -1 | 0 | 1 = lane < 0 ? -1 : lane > 0 ? 1 : 0;
+    if (k.returnToPlayer) {
+      k.returnLane = selected;
+      this.positionKickReturn(k.targetX ?? 0, selected);
+    } else { k.targetX = selected * 14; this.positionKickReturn(k.targetX, 0); }
+    audio.uiHover();
+  }
+
+  launchKickoff() {
+    const k = this.kick;
+    if (this.phase !== 'kick' || k.kind !== 'kickoff' || k.sub !== 'choose') return;
+    k.sub = 'runup';
+    k.t = 0;
+    k.ballT = 0;
+    this.setTicker(k.returnToPlayer ? 'OPPONENT KICKOFF' : 'KICKOFF');
+  }
+
+  private beginReceivedPunt(returnSpot = 35) {
+    const offenseDirection = this.offDir;
+    const startY = this.los - 15 * offenseDirection;
+    this.offDir = 1;
+
+    this.kick = {
+      kind: 'punt',
+      sub: 'flight',
+      t: 0,
+      arrow: 0.5,
+      dir: 1,
+      acc: 0,
+      good: true,
+      doink: false,
+      ballT: 0,
+      points: 0,
+      distance: Math.abs(startY - returnSpot),
+      window: 0,
+      startY,
+      endY: returnSpot,
+      returnSpot,
+      returnToPlayer: true,
+      kickerSide: 'def',
+    };
+
+    this.phase = 'kick';
+    this.play = 'dead';
+    this.positionPuntFormation('def', this.los, startY, returnSpot);
+    this.frameKickCamera(startY, returnSpot);
+    this.setTicker('OPPONENT PUNT - GET READY TO RETURN');
+  }
+
+  // Position the same entities that will be used when the kick is caught.
+  private positionKickReturn(targetX: number, returnLane: -1 | 0 | 1) {
+    const kickoffCoverage = this.kick.kind === 'kickoff';
+    const dir = this.offDir;
+    const returner = this.players.find((p) => p.side === 'off' && p.kind === 'wr');
+    if (!returner) return;
+    const catchX = clamp(targetX, -FIELD_HALF_W + 2, FIELD_HALF_W - 2);
+    const laneX = clamp(returnLane * 14, -FIELD_HALF_W + 2, FIELD_HALF_W - 2);
+    const blockers = this.players.filter((p) => p.side === 'off' && p !== returner && p.kind !== 'qb');
+    const defenders = this.players.filter((p) => p.side === 'def');
+    for (const p of this.players) {
+      if (p.side === 'off') {
+        if (p.kind === 'qb') {
+          p.x = 0; p.y = clamp(this.los - 8 * dir, 0, FIELD_LENGTH); p.state = 'idle';
+        } else if (p === returner) {
+          p.x = catchX; p.y = this.los; p.state = 'idle';
+        } else {
+          const i = blockers.indexOf(p);
+          const blend = (i + 1) / (blockers.length + 1);
+          const offset = (i % 3 - 1) * 2.5;
+          p.x = clamp(catchX + (laneX - catchX) * blend + offset, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+          p.y = this.los + (3 + Math.floor(i / 3) * 2) * dir;
+          p.route = []; p.ri = 0; p.state = 'block';
+        }
+      } else {
+        const i = defenders.indexOf(p);
+        const spread = (i - (defenders.length - 1) / 2) * 5.5;
+        p.x = clamp(laneX + spread, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+        p.y = kickoffCoverage ? this.kick.startY : this.los + (12 + (i % 2) * 3.5) * dir;
+        p.assignment = -1; p.role = 'rush'; p.state = 'chase';
+      }
+      p.vx = 0; p.vy = 0;
+    }
+    returner.x = catchX; returner.y = this.los;
+    returner.vx = 0; returner.vy = 0;
+    returner.route = []; returner.ri = 0;
+  }
+
+  private cycleDefenseFormation() {
+    const current = DEF_FRONT_OPTIONS.indexOf(this.defenseFormation);
+    this.defenseFormation = DEF_FRONT_OPTIONS[(current + 1) % DEF_FRONT_OPTIONS.length];
+    this.setupPlay();
+    this.switchDefender(true);
+    this.phase = 'presnap';
+    this.presnapT = 0;
+    this.setTicker(`DEFENSE: ${this.defenseFormation} — press F to change`);
+  }
+
+  private trySwatPass() {
+    const b = this.ball;
+    if (this.play !== 'air' || b.state !== 'air' || !this.cpuOffense) return;
+    const defender = this.players.find((p) =>
+      p.side === 'def' && p.ctrl && p.state !== 'down' && p.state !== 'tackled' && p.state !== 'whiff',
+    );
+    if (!defender || dist(defender.x, defender.y, b.x, b.y) > 4.5) return;
+    defender.anim = 'catch';
+    defender.armT = 0.3;
+    if (Math.random() >= 0.3) {
+      this.fx.popup(defender.x, defender.y, 'MISSED SWAT', '#ffd94d', 6);
+      return;
+    }
+    this.stats.breakups++;
+    this.fx.popup(defender.x, defender.y, 'SWATTED!', '#4dd8ff', 7);
+    this.fx.puff(b.x, b.y);
+    audio.ooh();
+    this.endPlay('inc', b.tx, b.ty, 0.4);
+  }
+
+  switchDefender(nearest = false) {
+    if (!this.cpuOffense) return;
+    const defenders = this.players.filter(p => p.side === 'def' && p.state !== 'down' && p.state !== 'tackled');
+    if (!defenders.length) return;
+    const focus = this.carrier() ?? this.players[this.qbId];
+    if (nearest && focus) defenders.sort((a, b) => dist(a.x, a.y, focus.x, focus.y) - dist(b.x, b.y, focus.x, focus.y));
+    const index = nearest ? 0 : (defenders.findIndex(p => p.id === this.ctrlId) + 1) % defenders.length;
+    for (const p of this.players) if (p.side === 'def') p.ctrl = false;
+    const selected = defenders[index];
+    selected.ctrl = true; selected.pad = 0;
+    this.ctrlId = selected.id; this.ctrlId2 = -1;
+  }
+
+  private beginCpuPossession(spot: number) {
+    this.cpuOffense = true;
+    this.cpuKickReturn = false;
+    this.kickReturnActive = false;
+    this.convPlay = false;
+    this.offDir = -1;
+    this.los = clamp(spot, 0.5, FIELD_LENGTH - 0.8);
+    this.ltg = Math.max(0, this.los - 10);
+    this.down = 1;
+    this.startCpuSnap();
+  }
+
+  private startCpuSnap() {
+    this.runSelected = false;
+    this.setupPlay();
+    this.switchDefender(true);
+    this.phase = 'presnap'; this.presnapT = 0;
+    this.setTicker('DEFEND - Q SWITCH DEFENDER');
+  }
+
+  private updateCpuOffense() {
+    if (this.phase === 'presnap' && this.presnapT >= 1.2) {
+      const yardsToGo = Math.max(1, (this.ltg - this.los) * this.offDir);
+      const runChance = clamp(0.42 + (yardsToGo <= 2 ? 0.18 : 0) - (this.down === 3 && yardsToGo >= 8 ? 0.16 : 0), 0.22, 0.68);
+      this.runSelected = Math.random() < runChance;
+      if (this.runSelected) {
+        this.runCallIndex = Math.floor(Math.random() * RUN_CALLS.length);
+        this.applyRunFormation();
+      }
+      this.snap();
+      return;
+    }
+    if (this.phase !== 'play' || this.play !== 'qb' || this.playT < 1.15 || this.handoffT > 0) return;
+    const qb = this.players[this.qbId];
+    if (!qb) return;
+    const defenders = this.players.filter((p) => p.side === 'def' && p.state !== 'down' && p.state !== 'tackled');
+    const receivers = this.players.filter((p) => p.side === 'off' && p.kind === 'wr');
+    const choices = receivers.map((wr) => {
+      let flight = this.flightTime(dist(qb.x, qb.y, wr.x, wr.y));
+      let target = { x: wr.x, y: wr.y };
+      for (let i = 0; i < 5; i++) {
+        target = this.predictRoutePosition(wr, flight);
+        flight = this.flightTime(dist(qb.x, qb.y, target.x, target.y));
+      }
+      const separation = defenders.length ? Math.min(...defenders.map((d) => dist(target.x, target.y, d.x, d.y))) : 12;
+      const gain = (target.y - this.los) * this.offDir;
+      const firstDownBonus = gain >= (this.ltg - this.los) * this.offDir ? 1.5 : 0;
+      const score = separation * 1.25 + firstDownBonus + clamp(gain, 0, 12) * 0.08 - flight * 0.55 + rand(-0.18, 0.18);
+      return { wr, separation, score };
+    });
+    choices.sort((a, b) => b.score - a.score);
+    const best = choices[0];
+    if (best && ((this.playT >= 1.25 && best.separation >= 1.5) || this.playT >= 2.1)) this.throwToSlot(best.wr.slot);
+  }
+
+  private beginKickReturn(returnSpot: number) {
+    if (this.kick.kind === 'kickoff') {
+      this.offDir = (-(Math.sign(this.kick.endY - this.kick.startY) || 1)) as 1 | -1;
+    } else {
+      this.offDir = 1;
+    }
+    if (this.kick.kind === 'punt') {
+      this.los = clamp(Math.round(returnSpot), 2, FIELD_LENGTH - 2);
+      this.ltg = Math.min(FIELD_LENGTH, this.los + 10);
+      this.down = 1;
+      this.convPlay = false;
+      // Keep the punt formation intact at the catch.
+    }
+    const returner = this.players.find((p) => p.side === 'off' && p.kind === 'wr');
+    if (!returner) {
+      this.phase = 'presnap';
+      this.presnapT = 0;
+      return;
+    }
+    if (this.kick.kind === 'kickoff') {
+      returner.x = this.kick.targetX ?? 0;
+      returner.y = returnSpot;
+      this.los = returnSpot;
+      this.ltg = clamp(returnSpot + 10 * this.offDir, 0, FIELD_LENGTH);
+    }
+    returner.speed = Math.min(7.5, Math.max(6.8, returner.speed));
+    returner.ctrl = !this.cpuOffense; returner.pad = 0;
+    this.ctrlId = this.cpuOffense ? -1 : returner.id; this.ctrlId2 = -1;
+    this.kickReturnActive = true;
+    this.becomeCarrier(returner);
+    if (this.cpuOffense) this.switchDefender(true);
+    returner.anim = 'catch'; returner.animT = 0; returner.armT = 0.25;
+    this.ball.state = 'held'; this.ball.x = returner.x; this.ball.y = returner.y;
+    this.ball.z = 1; this.ball.wrId = -1;
+    this.phase = 'play'; this.play = 'run'; this.playT = 0; this.deadT = 0;
+    this.result = 'none';
+    this.cam.tx = returner.x; this.cam.ty = returner.y + this.offDir * 5;
+    this.cam.tzoom = 1;
+    this.setTicker(this.cpuOffense ? 'COVER THE KICK - Q SWITCH DEFENDER' : 'KICK RETURN - WASD / ARROWS TO RUN');
+    audio.setCrowd(0.75);
+  }
 
   fourthGo() { this.phase = 'presnap'; this.presnapT = 0; this.setTicker('GOING FOR IT!'); audio.uiClick(); }
 
+  private positionPuntFormation(kickingSide: 'off' | 'def', line: number, punterY: number, landingY: number) {
+    const kickers = this.players.filter(p => p.side === kickingSide);
+    const receivers = this.players.filter(p => p.side !== kickingSide);
+    const punter = kickers.find(p => p.kind === 'qb') ?? kickers[0];
+    const gunners = kickers.filter(p => p !== punter && (p.kind === 'wr' || p.kind === 'db')).slice(0, 2);
+    const blockers = kickers.filter(p => p !== punter && !gunners.includes(p));
+    const returner = receivers.find(p => p.kind === 'wr' || p.kind === 'db');
+    for (const p of this.players) { p.ctrl = false; p.vx = 0; p.vy = 0; }
+    if (punter) { punter.x = 0; punter.y = punterY; }
+    gunners.forEach((p, i) => { p.x = i === 0 ? -FIELD_HALF_W + 2 : FIELD_HALF_W - 2; p.y = line; });
+    blockers.forEach((p, i) => { p.x = clamp((i - (blockers.length - 1) / 2) * 4, -20, 20); p.y = line; });
+    receivers.forEach((p, i) => {
+      if (p === returner) { p.x = 0; p.y = landingY; }
+      else { p.x = clamp((i - (receivers.length - 1) / 2) * 5, -24, 24); p.y = line + (kickingSide === 'off' ? 3 : -3); }
+    });
+  }
+
+  private beginPunt() {
+    const startY = this.los - 15;
+    const endY = Math.min(FIELD_LENGTH + ENDZONE_DEPTH, this.los + 41);
+
+    this.kick = {
+      kind: 'punt',
+      sub: 'sweep',
+      t: 0,
+      arrow: 0,
+      dir: 1,
+      acc: 0,
+      good: false,
+      doink: false,
+      ballT: 0,
+      points: 0,
+      distance: 41,
+      window: 0.2,
+      startY,
+      endY,
+      returnSpot: 0,
+      returnToPlayer: false,
+      kickerSide: 'off',
+    };
+
+    this.phase = 'kick';
+    this.positionPuntFormation('off', this.los, startY, endY);
+    this.frameKickCamera(startY, endY);
+    this.setTicker('PUNT');
+    audio.throwWhoosh();
+    audio.setCrowd(1.2);
+  }
+
   punt() {
     audio.uiClick();
-    audio.throwWhoosh();
-    const net = rand(34, 48);
-    let spot = this.los + net;
-    let msg = `PUNT NETS ${Math.round(net)} YARDS`;
-    if (spot >= 100) { spot = 80; msg = 'TOUCHBACK'; }
-    const fieldLeft = Math.max(2, 100 - spot);
+    this.beginPunt();
+  }
+
+  private finishPunt() {
+    const k = this.kick;
+    const touchback = k.endY >= FIELD_LENGTH;
+    const spot = touchback ? FIELD_LENGTH - 20 : k.endY;
+    const returnYards = touchback
+      ? 0
+      : Math.round(rand(0, 12) * (1 - k.acc * 0.35));
+
     this.showBanner([
-      { txt: 'PUNT TEAM', col: '#4dd8ff', size: 12 },
-      { txt: msg, col: '#eaffea', size: 8 },
+      { txt: 'PUNT', col: '#4dd8ff', size: 12 },
+      {
+        txt: touchback
+          ? 'TOUCHBACK'
+          : `PUNT ${Math.round(k.distance)} YDS / RETURN ${returnYards} YDS`,
+        col: '#eaffea',
+        size: 8,
+      },
     ], 1.6, false, () => {
-      if (this.cfg.cpuSim) this.cpuDrive(false, fieldLeft);
-      else this.nextPossession();
+      if (this.cfg.cpuSim) {
+        this.beginCpuPossession(spot - returnYards);
+      } else {
+        this.nextPossession(false, true);
+      }
     });
   }
 
@@ -1461,19 +2098,51 @@ export class GameEngine {
     const c = this.cfg;
     if (c.conv === 'kick') {
       if (k === 'k' || k === '1' || k === 'enter') this.beginKick(1, 'xp', 20, 0.17);
-      else if (k === 'g' || k === '2') this.beginConvPlay(97, 2);
+      else if (k === 'g' || k === '2') this.beginConvPlay(FIELD_LENGTH - 3, 2);
     } else if (c.conv === 'play') {
-      if (k === '1') this.beginConvPlay(95, 1);
-      else if (k === '2') this.beginConvPlay(90, 2);
+      if (k === '1') this.beginConvPlay(FIELD_LENGTH - 5, 1);
+      else if (k === '2') this.beginConvPlay(FIELD_LENGTH - 10, 2);
     }
   }
 
   beginKick(points: number, kind: KickKind = 'xp', distance = 20, window = 0.17) {
-    this.kick = { kind, sub: 'sweep', t: 0, arrow: 0, dir: 1, acc: 0, good: false, doink: false, ballT: 0, points, distance, window };
+    const startY =
+      kind === 'fg'
+        ? Math.max(8, FIELD_LENGTH - (distance - 17))
+        : FIELD_LENGTH - 8;
+    const endY = FIELD_LENGTH + ENDZONE_DEPTH;
+
+    this.kick = {
+      kind,
+      sub: 'sweep',
+      t: 0,
+      arrow: 0,
+      dir: 1,
+      acc: 0,
+      good: false,
+      doink: false,
+      ballT: 0,
+      points,
+      distance,
+      window,
+      startY,
+      endY,
+      returnSpot: 0,
+      returnToPlayer: false,
+      kickerSide: 'off',
+    };
+
     this.phase = 'kick';
-    this.cam.tzoom = 1.2;
-    this.cam.ty = this.clampCamY(this.los + 18);
+
+    const targetY = endY;
+    const visibleYards = this.vw / this.S;
+    const sideMargin = Math.max(1, (visibleYards - (targetY - startY)) / 2);
+
+    this.cam.ty = this.clampCamY(
+      startY + (this.camBias * this.vw) / this.S - sideMargin,
+    );
     this.cam.tx = 0;
+    this.cam.tzoom = 1;
     audio.setCrowd(1.4);
   }
 
@@ -1483,7 +2152,16 @@ export class GameEngine {
     k.acc = Math.abs(k.arrow - 0.5) * 2;
     k.good = k.acc <= k.window;
     k.doink = false;
-    if (!k.good && k.acc <= k.window * 2.1) { k.good = Math.random() < 0.45; k.doink = Math.random() < 0.45; }
+
+    if (k.kind === 'punt') {
+      k.distance = clamp(34 + (1 - k.acc) * 14, 30, 49);
+      k.endY = Math.min(FIELD_LENGTH + ENDZONE_DEPTH, this.los + k.distance);
+      this.positionPuntFormation('off', this.los, k.startY, k.endY);
+      this.frameKickCamera(k.startY, k.endY);
+    } else if (!k.good && k.acc <= k.window * 2.1) {
+      k.good = Math.random() < 0.45;
+      k.doink = !k.good && Math.random() < 0.45;
+    }
     k.sub = 'runup';
     k.t = 0;
     audio.whistle(0.12);
@@ -1525,8 +2203,10 @@ export class GameEngine {
     this.flashA = Math.max(0, this.flashA - dt * 3.2);
     this.shellRevealT = Math.max(0, this.shellRevealT - dt);
     const camLerp = this.play === 'air' ? 6.5 : 5.2;
-    this.cam.x = lerp(this.cam.x, this.clampCamX(this.cam.tx), Math.min(1, dt * 4.5));
-    this.cam.y = lerp(this.cam.y, this.clampCamY(this.cam.ty), Math.min(1, dt * camLerp));
+    const cameraX = this.phase === 'presnap' ? this.cam.tx : this.clampCamX(this.cam.tx);
+    this.cam.x = lerp(this.cam.x, cameraX, Math.min(1, dt * 4.5));
+    const cameraY = this.phase === 'kick' || this.phase === 'presnap' ? this.cam.ty : this.clampCamY(this.cam.ty);
+    this.cam.y = lerp(this.cam.y, cameraY, Math.min(1, dt * camLerp));
     this.cam.zoom = lerp(this.cam.zoom, this.cam.tzoom, Math.min(1, dt * 4));
     this.tickerX -= dt * 46;
     if (this.tickerX < -2400) this.tickerX = 0;
@@ -1548,15 +2228,18 @@ export class GameEngine {
     if (this.phase === 'over' || this.phase === 'conv' || this.phase === 'fourth') { this.updatePlayerAnim(dt); return; }
     if (this.phase === 'presnap') {
       this.presnapT += dt;
+      if (this.cpuOffense) this.updateCpuOffense();
       this.updatePlayerAnim(dt);
       for (const p of this.players) p.runPhase += dt * 2;
-      this.cam.tx = 0;
-      this.cam.ty = this.los + 10;
+      if (this.phase === 'presnap') this.framePresnap();
       if (this.cfg.clocked) this.tickClock(dt * 0.3);
       return;
     }
     if (this.phase === 'kick') { this.updateKick(dt); return; }
-    if (this.phase === 'play') this.updatePlay(dt);
+    if (this.phase === 'play') {
+      if (this.cpuOffense) this.updateCpuOffense();
+      this.updatePlay(dt);
+    }
   }
 
   // ---------------- tackle animation ----------------
@@ -1634,6 +2317,12 @@ export class GameEngine {
       }
     }
     if (this.cfg.clocked) this.tickClock(dt);
+    this.truckCooldown = Math.max(0, this.truckCooldown - dt);
+    if (this.handoffT > 0) {
+      this.updateRunHandoff(dt);
+      this.updatePlayerAnim(dt);
+      return;
+    }
 
     // ---- AI quarterback (drill) ----
     if (this.cfg.drill && this.play === 'qb') {
@@ -1667,8 +2356,8 @@ export class GameEngine {
       b.y = lerp(b.sy, b.ty, k);
       b.z = 1.4 + b.h * 4 * k * (1 - k);
       b.spin += dt * 16;
-      this.cam.tx = b.tx * 0.9;
-      this.cam.ty = lerp(b.sy, b.ty, k) + 2;
+      this.cam.tx = b.x;
+      this.cam.ty = b.y + this.offDir * 4;
       const wr = b.wrId >= 0 ? this.players[b.wrId] : null;
       if (wr && !wr.ctrl && (wr.state === 'seek' || wr.state === 'route')) {
         // For a number-key pass, leave the receiver on his assigned route.
@@ -1695,11 +2384,18 @@ export class GameEngine {
     for (const p of this.players) {
       if (p.side !== 'off' || p.stun > 0 || p.state === 'down' || p.state === 'tackled' || p.ctrl) continue;
       if (p.kind === 'wr') {
-        if (p.isCarrier) this.aiCarrier(p, dt);
+        if (p.isCarrier) { /* moved once in the carrier section below */ }
         else if (p.state === 'route') this.runRoute(p, dt);
         else if (p.state === 'seek' && this.ball.state !== 'air') p.state = 'block';
-        else if (p.state === 'block') this.runBlock(p, dt);
-      } else if (p.kind === 'ol') this.runOL(p, dt);
+        else if (p.state === 'block') {
+          if (this.runPlayActive && this.play === 'run') this.runRunBlocker(p, dt);
+          else this.runBlock(p, dt);
+        }
+      } else if (p.kind === 'ol') {
+        if (this.kickReturnActive) this.runBlock(p, dt);
+        else if (this.runPlayActive && this.play === 'run') this.runRunBlocker(p, dt);
+        else this.runOL(p, dt);
+      }
       else if (p.isQB && !p.isCarrier && this.play === 'qb' && !this.cfg.drill) this.pocketDrift(p, dt);
     }
 
@@ -1707,7 +2403,10 @@ export class GameEngine {
     for (const p of this.players) {
       if (p.side !== 'def' || p.stun > 0 || p.state === 'down' || p.state === 'whiff' || p.state === 'tackling') continue;
       if (p.state === 'dive') { this.updateDive(p, dt); continue; }
-      if (p.ctrl) continue;
+      if (p.ctrl) {
+        if (this.cpuOffense) this.driveEntity(p, dt, p.speed);
+        continue;
+      }
       if (p.kind === 'dl') this.runRusher(p, dt);
       else if (p.kind === 'db') this.runDB(p, dt);
     }
@@ -1759,51 +2458,54 @@ export class GameEngine {
       return;
     }
 
-    // ---- carrier: Retro Bowl style auto-run ----
-    // The carrier jogs upfield automatically at a steady pace.
-    // The player can ONLY move laterally (W/S or up/down arrows) to dodge.
-    // No forward/backward acceleration — just like Retro Bowl.
     const car = this.carrier();
     if (car && this.play === 'run' && car.state !== 'tackled') {
-      const autoSpeed = 3.4;  // steady upfield jog — never rockets
-      let lateral = 0;
-      if (car.pad === 1) {
-        if (this.keys['i']) lateral -= 1;
-        if (this.keys['k']) lateral += 1;
+      if (car.ctrl) {
+        this.driveEntity(car, dt, car.speed);
+        this.cam.tx = car.x;
+        this.cam.ty = car.y + this.offDir * 5;
+        this.checkRunState();
+      } else if (this.cpuOffense) {
+        this.aiCarrier(car, dt);
+        this.cam.tx = car.x;
+        this.cam.ty = car.y + this.offDir * 5;
+        this.checkRunState();
       } else {
-        if (this.keys['w'] || this.keys['arrowup']) lateral -= 1;
-        if (this.keys['s'] || this.keys['arrowdown']) lateral += 1;
-        if (this.joy.active) lateral += this.joy.dx / 3.2;
+        const autoSpeed = 3.4;
+        let lateral = 0;
+        if (car.pad === 1) {
+          if (this.keys['i']) lateral -= 1;
+          if (this.keys['k']) lateral += 1;
+        } else {
+          if (this.keys['w'] || this.keys['arrowup']) lateral -= 1;
+          if (this.keys['s'] || this.keys['arrowdown']) lateral += 1;
+          if (this.joy.active) lateral += this.joy.dx / 3.2;
+        }
+        lateral = clamp(lateral, -1, 1);
+        car.vy += (autoSpeed - car.vy) * Math.min(1, dt * 6);
+        car.vx += (lateral * 3.0 - car.vx) * Math.min(1, dt * 8);
+        car.vy = clamp(car.vy, -1, autoSpeed * 1.05);
+        car.vx = clamp(car.vx, -6, 6);
+        car.x = clamp(car.x + car.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
+        car.y += car.vy * dt;
+        if (Math.hypot(car.vx, car.vy) > 0.6) car.face = Math.atan2(car.vy, car.vx);
+        this.cam.tx = car.x;
+        this.cam.ty = car.y + this.offDir * 5;
+        this.checkRunState();
       }
-      lateral = clamp(lateral, -1, 1);
-      // auto-run forward (downfield = +y in our coord system)
-      const targetVy = autoSpeed;
-      const targetVx = lateral * 3.0;  // lateral dodge speed
-      car.vy += (targetVy - car.vy) * Math.min(1, dt * 6);
-      car.vx += (targetVx - car.vx) * Math.min(1, dt * 8);
-      // hard cap so nothing bugs out
-      car.vy = clamp(car.vy, -1, autoSpeed * 1.05);
-      car.vx = clamp(car.vx, -6, 6);
-      car.x = clamp(car.x + car.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
-      car.y += car.vy * dt;
-      if (Math.hypot(car.vx, car.vy) > 0.6) car.face = Math.atan2(car.vy, car.vx);
-      if (Math.random() < dt * 8) this.fx.grassBurst(car.x, car.y - 0.3, 1, 0.4);
-      this.cam.tx = car.x * 0.85;
-      this.cam.ty = car.y + 8;
-      this.checkRunState();
     } else if (this.play === 'qb') {
-      this.driveEntity(qb, dt, qb.speed * 0.8, true);
-      if (this.cfg.canScramble && qb.y > this.los + 0.2) {
+      if (!this.cpuOffense) this.driveEntity(qb, dt, qb.speed * 0.8, true);
+      if (!this.cpuOffense && this.cfg.canScramble && qb.y > this.los + 0.2) {
         this.qbScramble = true;
         this.becomeCarrier(qb);
         this.fx.popup(qb.x, qb.y, 'TUCK & RUN!', '#4dd8ff', 7);
-      } else if (!this.cfg.canScramble && qb.y > this.los - 0.2) qb.y = this.los - 0.2;
+      } else if (!this.cpuOffense && !this.cfg.canScramble && qb.y > this.los - 0.2) qb.y = this.los - 0.2;
       for (const p of this.players) {
         if (p.side !== 'def' || p.stun > 0 || p.state === 'down' || p.state === 'whiff') continue;
         if (dist(p.x, p.y, qb.x, qb.y) < 1.05) { this.sack(p, qb); return; }
       }
-      this.cam.tx = qb.x * 0.4;
-      this.cam.ty = this.los + 8 + Math.max(0, this.deepestWR() - this.los) * 0.32;
+      this.cam.tx = qb.x;
+      this.cam.ty = this.los + this.offDir * 8 + (this.cpuOffense ? 0 : Math.max(0, this.deepestWR() - this.los) * 0.32);
     }
 
     if (this.play === 'dead') { this.deadT -= dt; if (this.deadT <= 0) this.resolveDown(); }
@@ -1829,6 +2531,7 @@ export class GameEngine {
     // burst only happens on route breaks, not catch/run transitions
     spd *= p.stumble > 0 ? 0.32 : (p.burst > 0 && !p.isCarrier ? 1.12 : 1);
     spd *= this.stamMul(p);
+    spd *= this.sprintingFor(p) ? 1.12 : 1;
     const il = Math.hypot(ix, iy);
     if (il > 0.01) {
       const nx = ix / Math.max(1, il), ny = iy / Math.max(1, il);
@@ -1841,16 +2544,17 @@ export class GameEngine {
     }
     p.x = clamp(p.x + p.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
     p.y += p.vy * dt;
-    if (pocket) p.y = clamp(p.y, this.los - 16, 108);
+    if (pocket) p.y = clamp(p.y, this.los - 16, FIELD_LENGTH + 8);
+    else if (p.isCarrier) p.y = clamp(p.y, 0, FIELD_LENGTH + 8);
     if (Math.hypot(p.vx, p.vy) > 0.6) p.face = Math.atan2(p.vy, p.vx);
   }
 
   private checkRunState() {
     const car = this.carrier();
     if (!car || car.state === 'tackled') return;
-    const gain = car.y - this.los;
-    if (gain > this.stats.longest) this.stats.longest = Math.floor(gain);
-    if (car.y >= 100) { this.onTouchdown(car); return; }
+    const gain = (car.y - this.los) * this.offDir;
+    if (!this.cpuOffense && gain > this.stats.longest) this.stats.longest = Math.floor(gain);
+    if (this.offDir > 0 ? car.y >= FIELD_LENGTH : car.y <= 0) { this.onTouchdown(car); return; }
     if (Math.abs(car.x) >= FIELD_HALF_W - 0.15) {
       car.x = clamp(car.x, -FIELD_HALF_W, FIELD_HALF_W);
       if (this.cfg.drill) { this.endRep('oob'); return; }
@@ -1863,15 +2567,16 @@ export class GameEngine {
         if (p.side !== 'def' || p.stun > 0 || p.state === 'down' || p.state === 'whiff' || p.state === 'tackling') continue;
         const d = dist(p.x, p.y, car.x, car.y);
         if (p.state === 'dive' && d < 1.35) { this.landTackle(p, car); return; }
-        if (d < 1.05) { this.landTackle(p, car); return; }
+        if (d <= p.radius + car.radius + 0.22) { this.landTackle(p, car); return; }
       }
       return;
     }
     for (const p of this.players) {
       if (p.side !== 'def' || p.stun > 0 || p.state === 'down' || p.state === 'whiff' || p.state === 'tackling') continue;
       const dd = dist(p.x, p.y, car.x, car.y);
-      if (dd < 1.05) { this.attemptTackle(p, car); return; }
-      if (dd < 2.6 && dd > 1.1 && p.diveT <= 0 && p.state === 'chase' && Math.random() < 0.02) {
+      const tackleReach = p.radius + car.radius + 0.22;
+      if (dd <= tackleReach) { this.attemptTackle(p, car); return; }
+      if (dd < 2.6 && dd > tackleReach + 0.05 && p.diveT <= 0 && p.state === 'chase' && Math.random() < 0.02) {
         p.state = 'dive';
         p.diveT = 0.5;
         p.anim = 'dive';
@@ -1890,7 +2595,7 @@ export class GameEngine {
     p.vx *= Math.pow(0.25, dt);
     p.vy *= Math.pow(0.25, dt);
     const car = this.carrier();
-    if (car && car.state !== 'tackled' && dist(p.x, p.y, car.x, car.y) < 1.35) {
+    if (car && car.state !== 'tackled' && dist(p.x, p.y, car.x, car.y) <= p.radius + car.radius + 0.22) {
       if (this.cfg.drill) this.landTackle(p, car);
       else this.attemptTackle(p, car);
       return;
@@ -1910,14 +2615,14 @@ export class GameEngine {
     const power = clamp(Math.hypot(def.vx, def.vy) / 11, 0.5, 1.4);
     this.startTackle(def, car, power);
     this.setResult(def, 'TACKLE MADE!', true);
-    const gain = Math.floor(car.y - this.los);
+    const gain = Math.floor((car.y - this.los) * this.offDir);
     this.fx.popup(car.x, car.y, gain > 0 ? `STOPPED +${gain}` : 'STOPPED', '#ff6b6b', 8);
     this.endRep('tackle');
   }
 
   private deepestWR(): number {
     let d = this.los;
-    for (const p of this.players) if (p.kind === 'wr') d = Math.max(d, p.y);
+    for (const p of this.players) if (p.kind === 'wr') d = this.offDir > 0 ? Math.max(d, p.y) : Math.min(d, p.y);
     return d;
   }
 
@@ -1942,8 +2647,9 @@ export class GameEngine {
   }
 
   private pocketDrift(p: PlayerEnt, dt: number) {
-    if (this.keys['w'] || this.keys['a'] || this.keys['s'] || this.keys['d']) { p.vx *= 0.8; p.vy *= 0.8; return; }
-    this.steer(p, p.x * 0.98, Math.max(this.los - 9, p.y - 2), 2.2, dt, 4);
+    if (!this.cpuOffense && (this.keys['w'] || this.keys['a'] || this.keys['s'] || this.keys['d'])) { p.vx *= 0.8; p.vy *= 0.8; return; }
+    const pocketY = this.offDir > 0 ? Math.max(this.los - 9, p.y - 2) : Math.min(this.los + 9, p.y + 2);
+    this.steer(p, p.x * 0.98, pocketY, 2.2, dt, 4);
   }
 
   /** route running with real breaks: gather, plant, explode out */
@@ -1951,7 +2657,7 @@ export class GameEngine {
     if (this.play === 'run') { p.state = 'block'; return; }
     const base = p.speed * (p.jam > 0 ? 0.7 : 1);
     if (p.ri >= p.route.length) {
-      this.steer(p, p.x + p.vx * 0.3, p.y + 6, base * 0.62, dt, 4);
+      this.steer(p, p.x + p.vx * 0.3, p.y + 6 * this.offDir, base * 0.62, dt, 4);
       return;
     }
     const wp = p.route[p.ri];
@@ -1979,27 +2685,58 @@ export class GameEngine {
   /** AI carrier: auto-runs upfield at a steady jog, picks a lane to avoid defenders */
   private aiCarrier(p: PlayerEnt, dt: number) {
     const autoSpd = 3.4;
+    const direction = this.offDir;
     let bestLat = 0;
     let bestScore = -1e9;
     for (let i = -3; i <= 3; i++) {
       const lat = i * 1.5;
       const nx = p.x + lat;
-      const ny = p.y + autoSpd * 0.5;
+      const ny = p.y + direction * autoSpd * 0.5;
       if (Math.abs(nx) > FIELD_HALF_W - 1) continue;
-      let sc = -Math.abs(lat) * 0.3;
+      let sc = -Math.abs(lat) * 0.3 - (this.runPlayActive ? Math.abs(nx - this.runLaneX) * 0.08 : 0);
       for (const d of this.players) {
         if (d.side !== 'def' || d.state === 'down' || d.state === 'whiff') continue;
         sc -= Math.max(0, 7 - dist(nx, ny, d.x, d.y)) * 2;
       }
       if (sc > bestScore) { bestScore = sc; bestLat = lat; }
     }
-    p.vy += (autoSpd - p.vy) * Math.min(1, dt * 6);
+    p.vy += (direction * autoSpd - p.vy) * Math.min(1, dt * 6);
     p.vx += (bestLat * 0.8 - p.vx) * Math.min(1, dt * 7);
-    p.vy = clamp(p.vy, -1, autoSpd * 1.05);
+    p.vy = clamp(p.vy, -autoSpd * 1.05, autoSpd * 1.05);
     p.vx = clamp(p.vx, -6, 6);
     p.x = clamp(p.x + p.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
     p.y += p.vy * dt;
     if (Math.hypot(p.vx, p.vy) > 0.6) p.face = Math.atan2(p.vy, p.vx);
+  }
+
+  private runRunBlocker(p: PlayerEnt, dt: number) {
+    const carrier = this.carrier();
+    if (!carrier || p.id === carrier.id) return;
+    const dir = this.offDir;
+    const laneX = this.runPlayActive ? this.runLaneX : carrier.x;
+    const canBlock = (d: PlayerEnt) => d.side === 'def' && d.state !== 'down' && d.state !== 'tackled' && d.state !== 'whiff';
+    let defender = this.players.find((d) => d.id === p.assignment && canBlock(d));
+    if (!defender) {
+      const threats = this.players.filter(canBlock);
+      defender = threats.sort((a, b) => {
+        const score = (d: PlayerEnt) => dist(p.x, p.y, d.x, d.y) + Math.abs(d.x - laneX) * 0.28 + Math.max(0, -((d.y - carrier.y) * dir) - 1) * 0.65;
+        return score(a) - score(b);
+      })[0];
+      if (defender) p.assignment = defender.id;
+    }
+    if (!defender) {
+      const escortX = clamp(laneX + (p.x - laneX) * 0.3, -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+      this.steer(p, escortX, carrier.y + dir * 3, Math.max(p.speed, 4.2), dt, 8);
+      return;
+    }
+    this.steer(p, defender.x, defender.y, Math.max(p.speed, 4.4), dt, 10);
+    const contact = p.radius + defender.radius + 0.45;
+    if (dist(p.x, p.y, defender.x, defender.y) < contact && defender.stun <= 0) {
+      defender.stun = 0.35;
+      const side = Math.sign(defender.x - laneX) || Math.sign(defender.x - p.x) || 1;
+      defender.vx += side * 1.2;
+      defender.vy += dir * 1.1;
+    }
   }
 
   private runBlock(p: PlayerEnt, dt: number) {
@@ -2031,15 +2768,38 @@ export class GameEngine {
   }
 
   private runOL(p: PlayerEnt, dt: number) {
-    let near: PlayerEnt | null = null;
-    let nd = 3.4;
-    for (const d of this.players) {
-      if (d.kind !== 'dl' || d.stun > 0) continue;
-      const dd = dist(p.x, p.y, d.x, d.y);
-      if (dd < nd) { nd = dd; near = d; }
+    const carrier = this.play === 'run' ? this.carrier() : null;
+    if (!carrier) {
+      const near = this.players.filter((d) => d.side === 'def' && d.kind === 'dl' && d.state !== 'down' && d.state !== 'tackled' && d.state !== 'whiff')
+        .sort((a, b) => dist(p.x, p.y, a.x, a.y) - dist(p.x, p.y, b.x, b.y))[0];
+      if (near) this.steer(p, near.x, near.y, 4.4, dt, 8);
+      return;
     }
-    if (near) this.steer(p, near.x, Math.min(this.los + 1.2, near.y), 4.4, dt, 8);
-    else if (this.play === 'run' && this.carrier()) this.steer(p, this.los + 3 + p.slot, p.y, 4, dt, 6);
+    const dir = this.offDir;
+    const laneX = this.runPlayActive ? this.runLaneX : carrier.x;
+    const canBlock = (d: PlayerEnt) => d.side === 'def' && d.state !== 'down' && d.state !== 'tackled' && d.state !== 'whiff';
+    let target = this.players.find((d) => d.id === p.assignment && canBlock(d) && dist(d.x, d.y, carrier.x, carrier.y) < 20);
+    if (!target) {
+      const threats = this.players.filter(canBlock);
+      target = threats.sort((a, b) => {
+        const score = (d: PlayerEnt) => dist(p.x, p.y, d.x, d.y) + Math.abs(d.x - laneX) * 0.2 + Math.max(0, -((d.y - carrier.y) * dir) - 2) * 0.7;
+        return score(a) - score(b);
+      })[0];
+      if (target) p.assignment = target.id;
+    }
+    if (!target) {
+      const escortX = clamp(laneX + clamp((p.x - laneX) * 0.4, -3, 3), -FIELD_HALF_W + 1, FIELD_HALF_W - 1);
+      this.steer(p, escortX, carrier.y + dir * 2.5, Math.max(3.8, p.speed), dt, 7);
+      return;
+    }
+    this.steer(p, target.x, target.y, Math.max(4.4, p.speed), dt, 9);
+    const contact = p.radius + target.radius + 0.45;
+    if (dist(p.x, p.y, target.x, target.y) < contact && target.stun <= 0) {
+      target.stun = 0.32;
+      const side = Math.sign(target.x - laneX) || Math.sign(target.x - p.x) || 1;
+      target.vx += side * 1.2;
+      target.vy += dir * 1.0;
+    }
   }
 
   private runRusher(p: PlayerEnt, dt: number) {
@@ -2059,7 +2819,7 @@ export class GameEngine {
       if (blocker) {
         const side = p.x < 0 ? -1 : 1;
         const gx = p.move === 'speed' ? blocker.x + side * 2.6 : p.move === 'inside' ? blocker.x - side * 1.8 : blocker.x;
-        this.steer(p, gx, blocker.y + 0.5, p.move === 'bull' ? 2.4 : 3.6, dt, 6);
+        this.steer(p, gx, blocker.y + 0.5 * this.offDir, p.move === 'bull' ? 2.4 : 3.6, dt, 6);
         return;
       }
     }
@@ -2106,10 +2866,10 @@ export class GameEngine {
     // ---- man coverage: press -> backpedal -> hip flip -> trail ----
     if (p.role === 'man') {
       const wr = p.assignment >= 0 ? this.players[p.assignment] : null;
-      if (!wr) { this.steer(p, p.zx, this.los + 9, p.speed * 0.7, dt, 5); return; }
+      if (!wr) { this.steer(p, p.zx, this.los + 9 * this.offDir, p.speed * 0.7, dt, 5); return; }
       p.flipT = Math.max(0, p.flipT - dt);
-      const gap = wr.y - p.y;              // negative = DB is downfield of WR (good)
-      const wrSpeedY = wr.vy;
+      const gap = (wr.y - p.y) * this.offDir; // negative = DB is downfield of WR
+      const wrSpeedY = wr.vy * this.offDir;
 
       if (p.cover === 'press' && (p.t > 0.45 || dist(p.x, p.y, wr.x, wr.y) > 2.4)) {
         p.cover = 'backpedal';
@@ -2117,7 +2877,7 @@ export class GameEngine {
       if (p.cover === 'press') {
         p.t += dt;
         // mirror him at the line, deny the release
-        this.steer(p, wr.x + p.leverage * 0.35, this.los + 1.2, p.speed * 0.55, dt, 7);
+        this.steer(p, wr.x + p.leverage * 0.35, this.los + 1.2 * this.offDir, p.speed * 0.55, dt, 7);
         wr.openness = dist(p.x, p.y, wr.x, wr.y);
         return;
       }
@@ -2136,7 +2896,7 @@ export class GameEngine {
       const cushion = backpedal ? 1.7 : -0.2;
       const lead = backpedal ? 0.05 : 0.14;
       const tx = wr.x + wr.vx * lead + p.leverage * (backpedal ? 0.8 : 0.5);
-      const ty = wr.y + wr.vy * lead + cushion;
+      const ty = wr.y + wr.vy * lead + cushion * this.offDir;
       // backpedaling is slower; a receiver who wins his break stays won
       let spd = p.speed * (backpedal ? 0.88 : 1.0);
       if (p.flipT > 0) spd *= 0.72;
@@ -2159,7 +2919,7 @@ export class GameEngine {
       const inZone = dist(w.x, w.y, p.zx, p.zy);
       if (inZone > radius) continue;
       // the deepest / closest-to-my-landmark receiver is the threat
-      const rank = deep ? -w.y : inZone;
+      const rank = deep ? -w.y * this.offDir : inZone;
       if (rank < bestT) { bestT = rank; threat = w; }
     }
     let gx = p.zx;
@@ -2168,10 +2928,13 @@ export class GameEngine {
       gx = lerp(p.zx, threat.x, deep ? 0.55 : 0.78);
       gy = lerp(p.zy, threat.y, deep ? 0.35 : 0.6);
       // deep defenders never let anything get behind them
-      if (deep) gy = Math.max(gy, threat.y + 2.2, p.zy);
-      else gy = clamp(gy, this.los + 2, p.zy + 5);
+      if (deep) gy = this.offDir > 0 ? Math.max(gy, threat.y + 2.2, p.zy) : Math.min(gy, threat.y - 2.2, p.zy);
+      else {
+        const a = this.los + 2 * this.offDir, b = p.zy + 5 * this.offDir;
+        gy = clamp(gy, Math.min(a, b), Math.max(a, b));
+      }
     } else if (deep) {
-      gy = Math.max(p.zy, this.deepestWR() + 1.5);
+      gy = this.offDir > 0 ? Math.max(p.zy, this.deepestWR() + 1.5) : Math.min(p.zy, this.deepestWR() - 1.5);
     }
     const spd = threat ? p.speed * (deep ? 0.98 : 0.95) : p.speed * 0.65;
     this.steer(p, gx, gy, spd, dt, 5);
@@ -2193,42 +2956,38 @@ export class GameEngine {
   }
 
   private attemptTackle(def: PlayerEnt, car: PlayerEnt) {
-    let help = 0;
-    for (const p of this.players) {
-      if (p.side !== 'def' || p.id === def.id || p.state === 'down' || p.state === 'whiff') continue;
-      if (dist(p.x, p.y, car.x, car.y) < 2.4) help++;
-    }
-    const sprintOn = this.sprinting && car.stam > 0.05 && car.isCarrier;
-    let breakChance = 0.1 + (sprintOn ? 0.22 : 0) + (def.state === 'dive' ? 0.2 : 0) - help * 0.12;
-    if (this.breaksLeft <= 0) breakChance = 0;
-    if (Math.random() < breakChance) {
-      this.breaksLeft--;
-      def.state = 'down';
-      def.downT = 1.1;
-      def.stun = 1.1;
-      def.anim = 'fall';
-      def.animT = 0;
-      def.fallDir = Math.atan2(def.y - car.y, def.x - car.x);
-      car.vx *= 0.7; car.vy *= 0.7;
-      this.fx.tackleBurst(car.x, car.y);
-      this.fx.popup(car.x, car.y, 'BROKE IT!', '#ffd94d', 8);
-      this.trauma = Math.min(1, this.trauma + 0.35);
-      this.freezeT = 0.05;
-      this.burn(car, 0.12);
-      audio.block();
-      return;
-    }
     const power = clamp(Math.hypot(def.vx - car.vx, def.vy - car.vy) / 10, 0.5, 1.4);
     this.startTackle(def, car, power);
-    const gain = Math.floor(car.y - this.los);
+    const gain = Math.floor((car.y - this.los) * this.offDir);
     if (gain > 0) this.fx.popup(car.x, car.y, `+${gain}`, '#eaffea', 8);
     this.endPlay('tackle', car.x, car.y, 0.55);
+  }
+
+  private tryTruck() {
+    const car = this.carrier();
+    if (!car || !car.ctrl || !car.isCarrier) return;
+    if (this.truckCooldown > 0) return;
+    const defender = this.players.filter((p) => p.side === 'def' && p.stun <= 0 && p.state !== 'down' && p.state !== 'tackled' && p.state !== 'whiff' && p.state !== 'tackling')
+      .sort((a, b) => dist(a.x, a.y, car.x, car.y) - dist(b.x, b.y, car.x, car.y))[0];
+    if (!defender || dist(defender.x, defender.y, car.x, car.y) > 2) {
+      this.burn(car, 0.1);
+      this.setTicker('MISSED TRUCK - STAMINA -10%');
+      this.fx.popup(car.x, car.y, 'MISSED!', '#ff6b6b', 7);
+      return;
+    }
+    this.truckCooldown = 3;
+    defender.state = 'down'; defender.downT = 0.9; defender.stun = 0.9;
+    defender.anim = 'fall'; defender.animT = 0;
+    defender.fallDir = Math.atan2(defender.y - car.y, defender.x - car.x);
+    this.fx.tackleBurst(car.x, car.y);
+    this.fx.popup(car.x, car.y, 'TRUCK!', '#ffd94d', 8);
+    audio.block();
   }
 
   private sack(def: PlayerEnt, qb: PlayerEnt) {
     const power = clamp(Math.hypot(def.vx, def.vy) / 9, 0.6, 1.4);
     this.startTackle(def, qb, power);
-    const loss = Math.max(1, Math.round(this.los - qb.y + 1));
+    const loss = Math.max(1, Math.round((this.los - qb.y) * this.offDir + 1));
     this.fx.popup(qb.x, qb.y, `SACKED -${loss}`, '#ff6b6b', 8);
     this.stats.rushYds -= loss;
     this.stats.sacks++;
@@ -2313,8 +3072,7 @@ export class GameEngine {
       }
 
       b.state = 'held';
-      this.stats.completions++;
-      this.stats.catches++;
+      if (!this.cpuOffense) { this.stats.completions++; this.stats.catches++; }
 
       const diving = wrD > 2.0;
       this.becomeCarrier(wr, true);
@@ -2364,7 +3122,7 @@ export class GameEngine {
     audio.turnover(); audio.groan();
     this.flashCol = '#ff2d46'; this.flashA = 0.34;
     this.trauma = Math.min(1, this.trauma + 0.5);
-    this.stats.ints++;
+    if (!this.cpuOffense) this.stats.ints++;
     if (picker) {
       picker.state = 'down';
       picker.downT = 1.4;
@@ -2416,6 +3174,7 @@ export class GameEngine {
     this.deadT = 1.35;
     const youWR = this.drillSide === 'wr';
     let msg = '';
+    const beforeYou = this.drillYou, beforeOpp = this.drillOpp;
     switch (result) {
       case 'td':
         if (youWR) { this.drillYou += 2; msg = 'TOUCHDOWN! +2'; } else { this.drillOpp += 2; msg = 'HE SCORED  +2 THEM'; }
@@ -2434,6 +3193,10 @@ export class GameEngine {
         if (youWR) msg = 'INCOMPLETE  NO POINTS';
         else { this.drillYou += 1; msg = 'COVERED  +1'; }
         break;
+    }
+    if (this.drillYou !== beforeYou || this.drillOpp !== beforeOpp) {
+      const offenseScored = (this.drillYou !== beforeYou) === youWR;
+      this.scoreFireworks(offenseScored ? this.offTeam() : this.defTeam(), this.offDir > 0 ? FIELD_LENGTH : 0);
     }
     this.repMsg = msg;
     this.setTicker(msg);
@@ -2489,33 +3252,50 @@ export class GameEngine {
   // ---------------- scoring / downs ----------------
 
   private onTouchdown(car: PlayerEnt) {
+    const wasKickReturn = this.kickReturnActive;
+    this.kickReturnActive = false;
     this.play = 'dead';
     this.result = 'td';
     this.deadT = 1.3;
     car.vx = 0; car.vy = 0;
     car.anim = pick(['celebrate', 'spike', 'dance']);
     car.animT = 0;
-    car.face = Math.PI / 2; // face downfield
+    car.face = this.offDir * Math.PI / 2; // face downfield
     this.slowT = 0.55;
     this.freezeT = 0.07;
     this.trauma = Math.min(1, this.trauma + 0.4);
     this.flashCol = this.offColor().main;
     this.flashA = 0.3;
     const cols = [this.offColor().main, '#ffffff', '#ffd94d', this.offColor().dark];
-    this.fx.confetti(car.x, 104, 130, cols);
-    this.fx.confetti(car.x - 8, 102, 60, cols);
-    this.fx.confetti(car.x + 8, 102, 60, cols);
+    const celebrationY = this.offDir > 0 ? FIELD_LENGTH + 4 : -4;
+    this.fx.confetti(car.x, celebrationY, 130, cols);
+    this.fx.confetti(car.x - 8, celebrationY, 60, cols);
+    this.fx.confetti(car.x + 8, celebrationY, 60, cols);
     audio.touchdownSting();
     audio.cheer(1.4);
 
     if (this.cfg.drill) { this.stats.tds++; this.endRep('td'); return; }
     const c = this.cfg;
+    if (this.cpuOffense) {
+      const cpuPoints = c.tdPoints + (c.conv === 'kick' ? 1 : 0);
+      if (c.id === 'two2') this.p2[this.cur2P === 0 ? 1 : 0] += cpuPoints;
+      else this.scoreThem += cpuPoints;
+      this.scoreFireworks(this.offTeam(), this.offDir > 0 ? FIELD_LENGTH : 0);
+      this.setTicker('OPPONENT TOUCHDOWN');
+      this.showBanner([{ txt: 'OPPONENT TOUCHDOWN', col: '#ff6b6b', size: 13 }], 1.8, false, () => {
+        this.cpuOffense = false; this.cpuKickReturn = false; this.offDir = 1;
+        if (this.checkClockBoundary()) return;
+        if (c.specialTeams) this.beginKickoffSequence(true);
+        else { this.los = 25; this.ltg = 35; this.down = 1; this.setupPlay(); this.phase = 'presnap'; this.presnapT = 0; }
+      });
+      return;
+    }
     const pts = this.convPlay ? this.convValue : c.tdPoints;
     this.addScore(pts);
     this.stats.tds++;
-    const gain = Math.floor(car.y - this.los);
+    const gain = Math.floor((car.y - this.los) * this.offDir);
     if (gain > this.stats.longest) this.stats.longest = gain;
-    this.registerYards(car);
+    this.registerYards(car, wasKickReturn);
     audio.whistle(0.25, 0.5);
     this.setTicker('TOUCHDOWN!');
     if (this.convPlay) {
@@ -2532,9 +3312,11 @@ export class GameEngine {
     });
   }
 
-  private registerYards(car: PlayerEnt) {
-    const gain = car.y - this.los;
-    if (car.isQB && this.qbScramble) this.stats.rushYds += Math.max(0, Math.round(gain));
+  private registerYards(car: PlayerEnt, wasKickReturn = false) {
+    if (wasKickReturn || this.cpuOffense) return;
+
+    const gain = (car.y - this.los) * this.offDir;
+    if (this.runPlayActive || (car.isQB && this.qbScramble)) this.stats.rushYds += Math.max(0, Math.round(gain));
     else this.stats.passYds += Math.max(0, Math.round(gain));
   }
 
@@ -2543,11 +3325,34 @@ export class GameEngine {
     if (this.result === 'td') return;
     const r = this.result;
     this.result = 'none';
+
+    if (this.kickReturnActive && this.cpuKickReturn) {
+      const spot = this.endY;
+      this.kickReturnActive = false; this.cpuKickReturn = false;
+      if (this.checkClockBoundary()) return;
+      this.beginCpuPossession(spot);
+      return;
+    }
+    if (this.kickReturnActive) {
+      this.kickReturnActive = false;
+      this.los = clamp(this.endY, 0.5, FIELD_LENGTH - 0.8);
+      this.ltg = Math.min(FIELD_LENGTH, this.los + 10);
+      this.down = 1;
+      this.setTicker(`KICK RETURN - BALL AT ${Math.round(this.los)}`);
+
+      if (this.checkClockBoundary()) return;
+
+      this.setupPlay();
+      this.phase = 'presnap';
+      this.presnapT = 0;
+      return;
+    }
+
     if (r === 'tackle' || r === 'oob' || r === 'whistle') {
-      const spot = Math.max(0, Math.min(99.2, this.endY));
-      if (!this.convPlay) this.los = spot;
+      const spot = Math.max(0, Math.min(FIELD_LENGTH - 0.8, this.endY));
       const car = this.carrier();
       if (car) this.registerYards(car);
+      if (!this.convPlay) this.los = spot;
     }
     if (r === 'sack') this.los = Math.max(0.5, this.endY);
 
@@ -2559,20 +3364,30 @@ export class GameEngine {
         : [{ txt: 'CONVERSION FAILED', col: '#ffd94d', size: 11 }], 1.5, false, () => this.postScore());
       return;
     }
-    if (r === 'int') { this.onTurnover('INTERCEPTED!', '#ff4d5e', Math.max(2, 100 - this.endY)); return; }
+    if (r === 'int' && this.cpuOffense) {
+      this.cpuOffense = false;
+      this.offDir = 1;
+      this.los = clamp(this.endY, 0.5, FIELD_LENGTH - 0.8);
+      this.ltg = Math.min(FIELD_LENGTH, this.los + 10); this.down = 1;
+      if (this.checkClockBoundary()) return;
+      this.setupPlay(); this.phase = 'presnap'; this.presnapT = 0;
+      this.setTicker('INTERCEPTION - YOUR BALL');
+      return;
+    }
+    if (r === 'int') { this.offDir = -1; this.onTurnover('INTERCEPTED!', '#ff4d5e', this.endY); return; }
 
     if (c.practice) {
       this.down = 1;
       this.ltg = this.los + 10;
-      if (this.los > 88) { this.los = 25; this.ltg = 35; }
+      if (this.los > FIELD_LENGTH - 12) { this.los = 25; this.ltg = 35; }
       this.setupPlay();
       this.phase = 'presnap';
       this.presnapT = 0;
       return;
     }
-    if (r !== 'inc' && this.los >= this.ltg) {
+    if (r !== 'inc' && (this.los - this.ltg) * this.offDir >= 0) {
       this.down = 1;
-      this.ltg = Math.min(100, this.los + 10);
+      this.ltg = clamp(this.los + 10 * this.offDir, 0, FIELD_LENGTH);
       audio.firstDown();
       this.setTicker('1ST DOWN - MOVE THE CHAINS');
       this.flashCol = '#ffd94d';
@@ -2582,12 +3397,31 @@ export class GameEngine {
       return;
     }
     this.down++;
-    if (this.down > 4) { this.onTurnover('TURNOVER ON DOWNS', '#ff9f3c', Math.max(2, 100 - this.los)); return; }
+    if (this.down > 4 && this.cpuOffense) {
+      this.cpuOffense = false;
+      this.offDir = 1;
+      this.los = clamp(this.los, 0.5, FIELD_LENGTH - 0.8);
+      this.ltg = Math.min(FIELD_LENGTH, this.los + 10); this.down = 1;
+      if (this.checkClockBoundary()) return;
+      this.setupPlay(); this.phase = 'presnap'; this.presnapT = 0;
+      this.setTicker('TURNOVER ON DOWNS - YOUR BALL');
+      return;
+    }
+    if (this.down > 4) { this.offDir = -1; this.onTurnover('TURNOVER ON DOWNS', '#ff9f3c', this.los); return; }
     if (this.checkClockBoundary()) return;
     this.nextSnap();
   }
 
   private nextSnap() {
+    if (this.cpuOffense) {
+      if (this.down === 4 && this.cfg.specialTeams) {
+        const landing = clamp(this.los + this.offDir * 41, 5, FIELD_LENGTH - 5);
+        this.cpuOffense = false;
+        this.beginReceivedPunt(landing);
+      } else this.startCpuSnap();
+      return;
+    }
+    this.offDir = 1;
     this.setupPlay();
     this.runoffClock();
     if (this.down === 4 && this.cfg.specialTeams && !this.convPlay) {
@@ -2607,11 +3441,12 @@ export class GameEngine {
     this.setTicker(text);
     this.showBanner([{ txt: text, col, size: 13 }], 1.7, false, () => {
       if (c.practice) {
+        this.offDir = 1;
         this.down = 1; this.los = 25; this.ltg = 35;
         this.setupPlay(); this.phase = 'presnap'; this.presnapT = 0;
         return;
       }
-      if (c.cpuSim) this.cpuDrive(true, fieldLeft);
+      if (c.cpuSim) this.beginCpuPossession(fieldLeft);
       else this.nextPossession();
     });
   }
@@ -2626,59 +3461,22 @@ export class GameEngine {
       this.presnapT = 0;
       return;
     }
-    if (c.cpuSim) { this.cpuDrive(false, 75); return; }
-    this.nextPossession();
-  }
-
-  // ---------------- CPU drives (rating aware) ----------------
-
-  private cpuDrive(shortField: boolean, fieldLeft: number) {
-    const c = this.cfg;
-    if (!c.clocked || this.clock <= 0) { this.afterCpuDrive(); return; }
-    const burn = rand(18, 38);
-    const oppOff = this.opp.off;
-    const myDef = this.team.def;
-    // rating differential drives scoring odds
-    let prob = 0.3 + (oppOff - myDef) * 0.006 + (c.id === 'seven7' ? 0.08 : 0);
-    if (shortField) prob += clamp((100 - fieldLeft) * 0.004, 0, 0.25);
-    prob += Math.max(0, this.scoreThem - this.scoreUs) * 0.002;
-    prob = clamp(prob, 0.1, 0.62);
-    const roll = Math.random();
-    let lineTxt = '';
-    let scored = 0;
-    const star = pick(['K. COMET', 'D. ROCKET', 'J. BLUR', 'T. VECTOR', 'M. NOVA', 'R. SWIFT']);
-    if (roll < prob) {
-      scored = 7;
-      lineTxt = `TD: ${star} ${Math.floor(rand(6, 44))} YD STRIKE`;
-    } else if (roll < prob + 0.15 && Math.random() < 0.8) {
-      scored = 3;
-      lineTxt = `FG GOOD FROM ${Math.floor(rand(28, 46))}`;
-    } else {
-      lineTxt = pick(['PUNTS IT AWAY', 'STUFFED ON DOWNS', 'DRIVE STALLS', 'SACKED - PUNT', 'FUMBLES IT BACK']);
+    if (c.cpuSim && c.specialTeams) {
+      this.beginKickoffSequence(false);
+      return;
     }
-    this.clock = Math.max(0, this.clock - burn);
-    audio.setCrowd(0.8);
-    if (scored === 7) { this.scoreThem += 7; audio.groan(); }
-    else if (scored === 3) { this.scoreThem += 3; audio.ooh(); }
-    this.showBanner([
-      { txt: `${this.opp.abbr} POSSESSION`, col: '#ff6b6b', size: 11 },
-      { txt: lineTxt, col: scored > 0 ? '#ffd94d' : '#c9d4c9', size: 8 },
-      { txt: `${this.team.abbr} ${this.scoreUs}  -  ${this.opp.abbr} ${this.scoreThem}`, col: '#eaffea', size: 9 },
-    ], 2.1, false, () => this.afterCpuDrive());
+
+    if (c.cpuSim) {
+      this.beginCpuPossession(FIELD_LENGTH - 25);
+      return;
+    }
+
+    this.nextPossession(c.specialTeams);
   }
 
-  private afterCpuDrive() {
-    if (this.checkClockBoundary()) return;
-    this.los = Math.floor(rand(20, 35));
-    this.ltg = this.los + 10;
-    this.down = 1;
-    this.setTicker('YOUR BALL - 1ST & 10');
-    this.setupPlay();
-    this.phase = 'presnap';
-    this.presnapT = 0;
-  }
-
-  private nextPossession() {
+  private nextPossession(startWithKickoff = false, startWithPuntReturn = false) {
+    this.offDir = 1;
+    this.cpuOffense = false;
     const c = this.cfg;
     this.possIdx++;
     if (this.possIdx >= c.drives * 2) { this.gameOver(); return; }
@@ -2694,7 +3492,17 @@ export class GameEngine {
       { txt: `${pn} - ${t.abbr}`, col: t.c1 === '#000000' ? '#eaffea' : t.c1, size: 13 },
       { txt: `DRIVE ${Math.floor(this.possIdx / 2) + 1} OF ${c.drives}`, col: '#eaffea', size: 8 },
       { txt: 'PRESS SPACE WHEN READY', col: '#ffd94d', size: 8 },
-    ], 999, true, () => { this.phase = 'presnap'; this.presnapT = 0; });
+    ], 999, true, () => {
+      if (startWithKickoff) {
+        this.beginKickoffSequence(true);
+      } else if (startWithPuntReturn) {
+        this.offDir = -1;
+        this.beginReceivedPunt();
+      } else {
+        this.phase = 'presnap';
+        this.presnapT = 0;
+      }
+    });
   }
 
   private tickClock(dt: number) {
@@ -2718,6 +3526,7 @@ export class GameEngine {
     if (!c.clocked || this.clock > 0) return false;
     if (this.half === 1) {
       this.half = 2;
+      this.cpuOffense = false; this.cpuKickReturn = false; this.kickReturnActive = false; this.offDir = 1;
       this.clock = c.halfLen;
       audio.whistle(0.5);
       this.los = 25; this.ltg = 35; this.down = 1;
@@ -2733,7 +3542,13 @@ export class GameEngine {
     return true;
   }
 
+  private scoreFireworks(team: Team, endY: number) {
+    this.fx.fireworks(0, endY, [team.c1, team.c2, team.c3]);
+  }
+
   private addScore(n: number) {
+    if (n <= 0) return;
+    this.scoreFireworks(this.offTeam(), this.offDir > 0 ? FIELD_LENGTH : 0);
     if (this.cfg.id === 'two2') this.p2[this.cur2P] += n;
     else this.scoreUs += n;
   }
@@ -2769,29 +3584,103 @@ export class GameEngine {
   private updateKick(dt: number) {
     const k = this.kick;
     k.t += dt;
+
     if (k.sub === 'sweep') {
       k.arrow += k.dir * dt * (k.kind === 'fg' ? 1.25 + k.distance * 0.008 : 1.3);
       if (k.arrow > 1) { k.arrow = 1; k.dir = -1; }
       if (k.arrow < 0) { k.arrow = 0; k.dir = 1; }
-    } else if (k.sub === 'runup') {
-      if (k.t > 0.7) { k.sub = 'flight'; k.t = 0; audio.snap(); this.trauma = Math.min(1, this.trauma + 0.18); }
-    } else if (k.sub === 'flight') {
-      k.ballT = Math.min(1, k.t / 1.15);
-      if (k.ballT >= 1) {
-        k.sub = 'result';
-        k.t = 0;
-        if (k.doink) audio.doink();
-        if (k.good) { this.addScore(k.points); audio.kickGood(); } else audio.kickBad();
-        this.showBanner([
-          { txt: k.doink ? 'OFF THE UPRIGHT!' : k.good ? "IT'S GOOD!" : 'NO GOOD...', col: k.good ? '#aaff3c' : '#ff6b6b', size: 13 },
-          { txt: `${k.kind === 'fg' ? `${k.distance} YD FIELD GOAL` : 'EXTRA POINT'}  ${k.good ? `+${k.points}` : '+0'}`, col: '#ffffff', size: 8 },
-        ], 1.6, false, () => {
-          this.cam.tzoom = 1;
-          if (k.kind === 'fg') { if (this.cfg.cpuSim) this.cpuDrive(false, 75); else this.nextPossession(); }
-          else this.postScore();
-        });
-      }
+      return;
     }
+
+    if (k.sub === 'runup') {
+      const runupTime = k.kind === 'kickoff' ? 0.55 : 0.7;
+
+      if (k.t > runupTime) {
+        k.sub = 'flight';
+        k.t = 0;
+        audio.snap();
+        this.trauma = Math.min(1, this.trauma + 0.18);
+      }
+
+      return;
+    }
+
+    if (k.sub !== 'flight') return;
+
+    const flightDuration = k.kind === 'kickoff' ? Math.max(1.9, k.distance / 31.5) : 1.15;
+    k.ballT = Math.min(1, k.t / flightDuration);
+    if (k.kind === 'kickoff') {
+      const ballX = (k.targetX ?? 0) * k.ballT;
+      const ballY = k.startY + (k.endY - k.startY) * k.ballT;
+      {
+        const kickDir = Math.sign(k.endY - k.startY) || 1;
+        const coveredY = k.startY + kickDir * Math.min(9, Math.abs(k.endY - k.startY) * k.ballT);
+        for (const p of this.players) if (p.side === 'def') p.y = coveredY;
+      }
+      this.cam.tx = this.clampCamX(ballX);
+      const lookAhead = (0.52 - this.camBias) * this.vw / (this.S * this.cam.tzoom);
+      this.cam.ty = ballY - lookAhead;
+    }
+    if (k.kind === 'punt') {
+      const progress = clamp(k.ballT, 0, 1);
+      const ballY = k.startY + (k.endY - k.startY) * progress;
+      this.frameKickCamera(ballY, k.endY);
+    }
+    if (k.ballT < 1) return;
+
+    if (k.kind === 'kickoff') {
+      this.beginKickReturn(k.endY);
+      return;
+    }
+
+    if (k.kind === 'punt') {
+      if (k.returnToPlayer) {
+        this.beginKickReturn(k.returnSpot);
+      } else {
+        this.finishPunt();
+      }
+      return;
+    }
+
+    k.sub = 'result';
+    k.t = 0;
+
+    if (k.doink) audio.doink();
+    if (k.good) {
+      this.addScore(k.points);
+      audio.kickGood();
+    } else {
+      audio.kickBad();
+    }
+
+    this.showBanner([
+      {
+        txt: k.doink ? 'OFF THE UPRIGHT!' : k.good ? "IT'S GOOD!" : 'NO GOOD...',
+        col: k.good ? '#aaff3c' : '#ff6b6b',
+        size: 13,
+      },
+      {
+        txt: `${k.kind === 'fg' ? `${k.distance} YD FIELD GOAL` : 'EXTRA POINT'}  ${k.good ? `+${k.points}` : '+0'}`,
+        col: '#ffffff',
+        size: 8,
+      },
+    ], 1.6, false, () => {
+      if (k.kind === 'fg') {
+        if (k.good) {
+          if (this.cfg.cpuSim && this.cfg.specialTeams) {
+            this.beginKickoffSequence(false);
+          } else {
+            this.nextPossession(this.cfg.specialTeams);
+          }
+        } else if (this.cfg.cpuSim) {
+          this.beginCpuPossession(this.los);
+        } else {
+          this.nextPossession();
+        }
+      } else {
+        this.postScore();
+      }
+    });
   }
 
   // ---------------- animation ----------------
@@ -2835,7 +3724,9 @@ export class GameEngine {
     if (this.cfg.practice) return `1ST & ${Math.max(1, Math.ceil(this.ltg - this.los))}`;
     const d = Math.min(this.down, 4);
     const dn = ['', '1ST', '2ND', '3RD', '4TH'][d];
-    const dst = this.ltg >= 99.5 ? 'GOAL' : String(Math.max(1, Math.ceil(this.ltg - this.los)));
+    const yards = Math.max(1, Math.ceil((this.ltg - this.los) * this.offDir));
+    const atGoal = this.offDir > 0 ? this.ltg >= FIELD_LENGTH - 0.5 : this.ltg <= 0.5;
+    const dst = atGoal ? 'GOAL' : String(yards);
     return `${dn} & ${dst}`;
   }
 
@@ -2872,8 +3763,18 @@ export class GameEngine {
       p2: this.p2,
       clock: this.clock,
       half: this.half,
+      down: this.down,
+      ltg: this.ltg,
+      carrierId: this.carrierId,
+      kickReturnActive: this.kickReturnActive,
+      cpuOffense: this.cpuOffense,
+      offDir: this.offDir,
+      handoffT: this.handoffT,
+      kick: { ...this.kick },
       players: this.players.map(p => ({
-        id: p.id, x: p.x, y: p.y, face: p.face, anim: p.anim, animT: p.animT, stun: p.stun, stam: p.stam
+        id: p.id, x: p.x, y: p.y, face: p.face, anim: p.anim, animT: p.animT, stun: p.stun, stam: p.stam,
+        state: p.state,
+        isCarrier: p.isCarrier,
       })),
       ball: { x: this.ball.x, y: this.ball.y, z: this.ball.z, state: this.ball.state },
       cam: { tx: this.cam.tx, ty: this.cam.ty, tzoom: this.cam.tzoom },
@@ -2892,6 +3793,17 @@ export class GameEngine {
     this.p2 = s.p2;
     this.clock = s.clock;
     this.half = s.half;
+    if (typeof s.down === 'number') this.down = s.down;
+    if (typeof s.ltg === 'number') this.ltg = s.ltg;
+    if (typeof s.carrierId === 'number') this.carrierId = s.carrierId;
+    this.kickReturnActive = s.kickReturnActive === true;
+    this.cpuOffense = s.cpuOffense === true;
+    if (s.offDir === 1 || s.offDir === -1) this.offDir = s.offDir;
+    if (typeof s.handoffT === 'number') this.handoffT = s.handoffT;
+
+    if (s.kick && typeof s.kick === 'object') {
+      this.kick = { ...this.kick, ...s.kick };
+    }
     this.tickerMsg = s.ticker;
     
     // Sync players
@@ -2901,6 +3813,8 @@ export class GameEngine {
         lp.x = rp.x; lp.y = rp.y; lp.face = rp.face;
         lp.anim = rp.anim; lp.animT = rp.animT;
         lp.stun = rp.stun; lp.stam = rp.stam;
+        if (rp.state) lp.state = rp.state;
+        if (typeof rp.isCarrier === 'boolean') lp.isCarrier = rp.isCarrier;
       }
     });
 

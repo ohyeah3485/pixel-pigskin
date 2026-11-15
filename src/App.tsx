@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import { GameEngine } from './game/engine';
 import { DrillSide, FinalStats, ModeId, Mods } from './game/types';
 import { MainMenu } from './ui/MainMenu';
@@ -13,6 +14,33 @@ import { network } from './network/client';
 
 const MODS_KEY = 'pixel-pigskin.mods';
 const TEAM_KEY = 'pixel-pigskin.team';
+
+function RunPlayButton({ engineRef }: { engineRef: RefObject<GameEngine | null> }) {
+  const [state, setState] = useState({ visible: false, selected: false, runName: 'HB DIVE' });
+  useEffect(() => {
+    const update = () => {
+      const engine = engineRef.current;
+      const visible = !!engine && !engine.paused && engine.phase === 'presnap' && !engine.cfg.drill && !engine.cpuOffense;
+      const selected = !!engine?.runSelected;
+      const next = { visible, selected, runName: engine?.selectedRunName ?? 'HB DIVE' };
+      setState(previous => previous.visible === next.visible && previous.selected === next.selected && previous.runName === next.runName ? previous : next);
+    };
+    update();
+    const timer = window.setInterval(update, 100);
+    return () => window.clearInterval(timer);
+  }, [engineRef]);
+  if (!state.visible) return null;
+  return (
+    <button
+      type="button"
+      aria-pressed={state.selected}
+      onClick={() => engineRef.current?.selectRun()}
+      className={`pix-btn absolute left-1/2 bottom-[26%] -translate-x-1/2 px-4 py-2 text-[10px] ${state.selected ? 'bg-[#1d5c33] text-[#aaff3c]' : 'bg-[#3f3312] text-[#ffd94d]'}`}
+    >
+      RUN: {state.runName} [R]
+    </button>
+  );
+}
 
 function loadTeam(): { teamId: string; oppId: string | null } {
   try {
@@ -298,7 +326,10 @@ export default function App() {
               EST 1995
             </div>
           </div>
-          <canvas ref={canvasRef} className="game-canvas block" style={{ touchAction: 'none' }} />
+          <div className="relative">
+            <canvas ref={canvasRef} className="game-canvas block" style={{ touchAction: 'none' }} />
+            <RunPlayButton engineRef={engineRef} />
+          </div>
         </div>
       )}
 
