@@ -9,6 +9,9 @@ export const FIELD_HALF_W = 26.65;
 export const FIELD_LENGTH = 120;
 export const ENDZONE_DEPTH = 10;
 
+// Keep human and AI movement balanced while making the action feel quicker.
+const PLAYER_RUN_SPEED = 1.2;
+
 type DefFront = '4-3' | '3-4' | 'Nickel' | 'Dime' | 'Goal Line';
 
 const DEF_FRONT_OPTIONS: DefFront[] = ['4-3', '3-4', 'Nickel', 'Dime', 'Goal Line'];
@@ -1640,7 +1643,7 @@ export class GameEngine {
         continue;
       }
 
-      const moveSpeed = speed * this.stamMul(p);
+      const moveSpeed = speed * this.stamMul(p) * PLAYER_RUN_SPEED;
       const blend = Math.min(1, dt * agility);
 
       vx += (dx / distance * moveSpeed - vx) * blend;
@@ -2422,7 +2425,7 @@ export class GameEngine {
         if (!dp || dp.stun > 0 || dp.state === 'dive' || dp.state === 'tackling' || dp.state === 'tackled') continue;
         if (dp.isCarrier && drillCar) {
           // auto-run like Retro Bowl
-          const autoSpd = 3.4;
+          const autoSpd = 3.4 * PLAYER_RUN_SPEED;
           let lat = 0;
           if (dp.pad === 1) {
             if (this.keys['i']) lat -= 1;
@@ -2434,7 +2437,7 @@ export class GameEngine {
           }
           lat = clamp(lat, -1, 1);
           dp.vy += (autoSpd - dp.vy) * Math.min(1, dt * 6);
-          dp.vx += (lat * 3.0 - dp.vx) * Math.min(1, dt * 8);
+          dp.vx += (lat * 3.0 * PLAYER_RUN_SPEED - dp.vx) * Math.min(1, dt * 8);
           dp.vy = clamp(dp.vy, -1, autoSpd * 1.05);
           dp.vx = clamp(dp.vx, -6, 6);
           dp.x = clamp(dp.x + dp.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
@@ -2471,7 +2474,7 @@ export class GameEngine {
         this.cam.ty = car.y + this.offDir * 5;
         this.checkRunState();
       } else {
-        const autoSpeed = 3.4;
+        const autoSpeed = 3.4 * PLAYER_RUN_SPEED;
         let lateral = 0;
         if (car.pad === 1) {
           if (this.keys['i']) lateral -= 1;
@@ -2483,7 +2486,7 @@ export class GameEngine {
         }
         lateral = clamp(lateral, -1, 1);
         car.vy += (autoSpeed - car.vy) * Math.min(1, dt * 6);
-        car.vx += (lateral * 3.0 - car.vx) * Math.min(1, dt * 8);
+        car.vx += (lateral * 3.0 * PLAYER_RUN_SPEED - car.vx) * Math.min(1, dt * 8);
         car.vy = clamp(car.vy, -1, autoSpeed * 1.05);
         car.vx = clamp(car.vx, -6, 6);
         car.x = clamp(car.x + car.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
@@ -2530,7 +2533,7 @@ export class GameEngine {
     }
     // burst only happens on route breaks, not catch/run transitions
     spd *= p.stumble > 0 ? 0.32 : (p.burst > 0 && !p.isCarrier ? 1.12 : 1);
-    spd *= this.stamMul(p);
+    spd *= this.stamMul(p) * PLAYER_RUN_SPEED;
     spd *= this.sprintingFor(p) ? 1.12 : 1;
     const il = Math.hypot(ix, iy);
     if (il > 0.01) {
@@ -2627,7 +2630,7 @@ export class GameEngine {
   }
 
   private steer(p: PlayerEnt, tx: number, ty: number, speed: number, dt: number, agility = 7) {
-    speed *= this.stamMul(p);
+    speed *= this.stamMul(p) * PLAYER_RUN_SPEED;
     const dx = tx - p.x, dy = ty - p.y;
     const l = Math.hypot(dx, dy);
     if (l < 0.05) { p.vx *= 0.8; p.vy *= 0.8; return; }
@@ -2684,7 +2687,7 @@ export class GameEngine {
 
   /** AI carrier: auto-runs upfield at a steady jog, picks a lane to avoid defenders */
   private aiCarrier(p: PlayerEnt, dt: number) {
-    const autoSpd = 3.4;
+    const autoSpd = 3.4 * PLAYER_RUN_SPEED;
     const direction = this.offDir;
     let bestLat = 0;
     let bestScore = -1e9;
@@ -2701,7 +2704,7 @@ export class GameEngine {
       if (sc > bestScore) { bestScore = sc; bestLat = lat; }
     }
     p.vy += (direction * autoSpd - p.vy) * Math.min(1, dt * 6);
-    p.vx += (bestLat * 0.8 - p.vx) * Math.min(1, dt * 7);
+    p.vx += (bestLat * 0.8 * PLAYER_RUN_SPEED - p.vx) * Math.min(1, dt * 7);
     p.vy = clamp(p.vy, -autoSpd * 1.05, autoSpd * 1.05);
     p.vx = clamp(p.vx, -6, 6);
     p.x = clamp(p.x + p.vx * dt, -FIELD_HALF_W, FIELD_HALF_W);
@@ -2838,7 +2841,7 @@ export class GameEngine {
       const b = this.ball;
       const timeLeft = Math.max(0.01, b.T - b.t);
       if (p.reactT <= 0 && !p.playBall && p.estX === 0 && p.estY === 0) {
-        const need = dist(p.x, p.y, b.tx, b.ty) / Math.max(1, p.speed);
+        const need = dist(p.x, p.y, b.tx, b.ty) / Math.max(1, p.speed * PLAYER_RUN_SPEED * this.stamMul(p));
         p.playBall = need <= timeLeft * 0.92;
         // tracking it over his shoulder: the less margin he has, the worse he
         // plays it — and being out of position is not something he recovers from
@@ -2946,9 +2949,10 @@ export class GameEngine {
 
   private pursue(p: PlayerEnt, car: PlayerEnt, dt: number) {
     const sp = p.chaseSpeed;
-    let t = dist(p.x, p.y, car.x, car.y) / Math.max(1, sp);
+    const pursuitSpeed = sp * PLAYER_RUN_SPEED * this.stamMul(p);
+    let t = dist(p.x, p.y, car.x, car.y) / Math.max(1, pursuitSpeed);
     for (let i = 0; i < 3; i++) {
-      t = Math.hypot(car.x + car.vx * t - p.x, car.y + car.vy * t - p.y) / Math.max(1, sp);
+      t = Math.hypot(car.x + car.vx * t - p.x, car.y + car.vy * t - p.y) / Math.max(1, pursuitSpeed);
     }
     t = clamp(t, 0, 1.1);
     const far = dist(p.x, p.y, car.x, car.y) > 13;
