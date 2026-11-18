@@ -1384,6 +1384,27 @@ function drawPlayCallPanel(e: GameEngine, ctx: CanvasRenderingContext2D, mid: nu
   const px = mid - pw / 2;
   const py = base - ph - 34;
 
+  // Two clickable coach suggestions: choose either a pass or a run.
+  const suggestions = e.getPlaySuggestions();
+  const gap = 8, cardWidth = (pw - gap) / 2, cardY = 150, cardHeight = 52;
+  const cards = [
+    { kind: 'pass' as const, data: suggestions.pass, key: 'Z', color: '#4dd8ff' },
+    { kind: 'run' as const, data: suggestions.run, key: 'X', color: '#ffd94d' },
+  ];
+  cards.forEach(({ kind, data, key, color }, i) => {
+    const x = px + i * (cardWidth + gap);
+    ctx.fillStyle = 'rgba(4,18,9,0.96)';
+    ctx.fillRect(x, cardY, cardWidth, cardHeight);
+    ctx.strokeStyle = data ? color : '#365341';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, cardY, cardWidth, cardHeight);
+    text(ctx, `COACH ${kind.toUpperCase()}${e.isTouch ? '' : ` [${key}]`}`, x + cardWidth / 2, cardY + 10, 6, color);
+    text(ctx, data?.name ?? 'UNAVAILABLE', x + cardWidth / 2, cardY + 25, 7, '#ffffff');
+    text(ctx, data?.reason ?? 'NO RUNNING BACK', x + cardWidth / 2, cardY + 40, 5, '#a9cbb0');
+    if (data) e.ui.push({ id: `suggest-${kind}`, x, y: cardY, w: cardWidth, h: cardHeight,
+      label: data.name, color, cb: () => e.selectSuggestedPlay(kind) });
+  });
+
   // panel background
   ctx.fillStyle = 'rgba(4,18,9,0.94)';
   ctx.fillRect(px, py, pw, ph);
@@ -1487,7 +1508,7 @@ function drawHints(e: GameEngine, ctx: CanvasRenderingContext2D) {
   if (e.phase === 'presnap') {
     hints = e.cpuOffense ? ['WASD MOVE', 'Q SWITCH DEFENDER', 'F CHANGE DEFENSE'] : e.cfg.drill
       ? (e.twoP ? ['SPACE SNAP', 'WASD P1', 'IJKL P2', 'ESC PAUSE'] : ['SPACE SNAP', 'WASD MOVE', 'ESC PAUSE'])
-      : ['Q/E PLAY', 'R RUN', 'DRAG AUTO-SNAP', '1-6 TARGET'];
+      : ['Q/E PLAY', 'R RUN', 'Z/X COACH PICKS', '1-6 TARGET'];
   } else if (e.phase === 'play' && e.cpuOffense) {
     hints = ['WASD MOVE', 'Q SWITCH DEFENDER', 'SPACE SWAT (PASS IN AIR)'];
   } else if (e.phase === 'play' && e.cfg.drill) {

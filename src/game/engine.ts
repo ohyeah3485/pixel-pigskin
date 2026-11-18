@@ -155,6 +155,8 @@ const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const pick = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
 
 interface PlayCall { name: string; routes: string[]; }
+interface PlaySuggestion { index: number; name: string; reason: string; }
+type FormationPlayer = Pick<PlayerEnt, 'id' | 'x' | 'y' | 'vx' | 'vy' | 'route' | 'ri' | 'state' | 'assignment' | 'zx' | 'zy'>;
 
 const RUN_CALLS = [
   { name: 'HB DIVE', backX: 2.2, laneX: 0 },
@@ -348,6 +350,7 @@ export class GameEngine {
   cpuOffense = false;
   private cpuKickReturn = false;
   runSelected = false;
+  private passFormation: FormationPlayer[] | null = null;
   private offDir: 1 | -1 = 1;
   private runCallIndex = 0;
   private runLaneX = 0;
@@ -490,7 +493,7 @@ export class GameEngine {
     // Account for sprites and the top scoreboard / bottom play-call panel.
     minX -= 2.5; maxX += 2.5; minY -= 3; maxY += 3;
     const left = 24, right = this.vw - 24;
-    const top = 150, bottom = this.vh - (this.cfg.drill || this.cpuOffense ? 75 : 140);
+    const top = this.cfg.drill || this.cpuOffense ? 150 : 220, bottom = this.vh - (this.cfg.drill || this.cpuOffense ? 75 : 140);
     const zoom = Math.min(1.15, (right - left) / ((maxY - minY) * this.S),
       (bottom - top) / ((maxX - minX) * this.S));
     this.cam.tzoom = Math.max(0.1, zoom);
@@ -662,6 +665,7 @@ export class GameEngine {
   // ---------------- setup ----------------
 
   setupPlay(convFrom?: number) {
+    this.syncSeasonPlaybook();
     const c = this.cfg;
     this.players = [];
     this.resetPlayState();
@@ -857,6 +861,7 @@ export class GameEngine {
   }
 
   private resetPlayState() {
+    this.passFormation = null;
     this.runPlayActive = false;
     this.handoffT = 0;
     this.forceDrillThrow = false;
@@ -996,10 +1001,72 @@ export class GameEngine {
     return qb ? qb.stam : 1;
   }
 
+  /** Coach's best guesses for this look, not guarantees of success. */
+  getPlaySuggestions(): { pass: PlaySuggestion; run: PlaySuggestion | null } {
+    const six = this.seasonPlays === SEASON_PLAYS_6;
+    const matchups: Record<Shell, { five: string; six: string; reason: string }> = {
+      blitz: { five: 'QUICK GAME', six: 'STICKS', reason: 'BLITZ: QUICK OUTLETS' },
+      man: { five: 'MESH', six: 'SCATTER', reason: 'MAN: CROSSING ROUTES' },
+      cover2: { five: 'SMASH', six: 'SPREAD FLOOD', reason: 'COVER 2: SIDELINE GAP' },
+      cover3: { five: 'CURL-FLAT', six: 'STICKS', reason: 'COVER 3: UNDERNEATH' },
+    };
+    const matchup = matchups[this.shell];
+    const name = six ? matchup.six : matchup.five;
+    const passIndex = Math.max(0, this.seasonPlays.findIndex((play) => play.name === name));
+    const pass = { index: passIndex, name: this.seasonPlays[passIndex].name, reason: matchup.reason };
+    if (!this.players.some((p) => p.side === 'off' && p.kind === 'wr')) return { pass, run: null };
+
+    // Read actual defenders near each run lane rather than assuming personnel from a label.
+    const front = this.players.filter((p) => p.side === 'def' && (p.y - this.los) * this.offDir >= -2 && (p.y - this.los) * this.offDir <= 9);
+    const yardsToGo = Math.max(0, (this.ltg - this.los) * this.offDir);
+    const pressure = (lane: number) => front.reduce((sum, d) => {
+      const lateral = Math.abs(d.x - lane);
+      const depth = Math.max(0, (d.y - this.los) * this.offDir);
+      return sum + Math.max(0, 1 - lateral / 7) * (1 - depth / 18);
+    }, 0);
+    const scores = RUN_CALLS.map((call, i) => pressure(call.laneX) - (i === 0 && yardsToGo <= 3 ? 0.5 : 0));
+    const runIndex = scores.indexOf(Math.min(...scores));
+    const run = { index: runIndex, name: RUN_CALLS[runIndex].name,
+      reason: runIndex === 0 && yardsToGo <= 3 ? 'SHORT YARDAGE: INSIDE' : 'LIGHTER RUNNING LANE' };
+    return { pass, run };
+  }
+
+  private savePassFormation() {
+    this.passFormation = this.players.filter((p) => p.side === 'off').map((p) => ({
+      id: p.id, x: p.x, y: p.y, vx: p.vx, vy: p.vy, route: p.route.map((pt) => ({ ...pt })),
+      ri: p.ri, state: p.state, assignment: p.assignment, zx: p.zx, zy: p.zy,
+    }));
+  }
+
+  private restorePassFormation() {
+    if (!this.passFormation) return;
+    for (const saved of this.passFormation) {
+      const player = this.players.find((p) => p.id === saved.id && p.side === 'off');
+      if (player) Object.assign(player, saved);
+    }
+    this.passFormation = null;
+  }
+
+  selectSuggestedPlay(kind: 'pass' | 'run') {
+    if (this.phase !== 'presnap' || this.cfg.drill || this.cpuOffense || this.paused) return;
+    const suggestion = this.getPlaySuggestions()[kind];
+    if (!suggestion) return;
+    if (kind === 'run') {
+      if (!this.runSelected) this.savePassFormation();
+      this.runSelected = true;
+      this.runCallIndex = suggestion.index;
+      this.applyRunFormation();
+      audio.uiHover();
+    } else {
+      this.changeSeasonPlay(suggestion.index - this.seasonPlayIdx);
+    }
+    this.setTicker(`COACH SUGGESTS ${suggestion.name} - ${suggestion.reason}`);
+  }
+
   selectRun() {
     if (this.phase !== 'presnap' || this.cfg.drill || this.cpuOffense) return;
     if (this.runSelected) this.runCallIndex = (this.runCallIndex + 1) % RUN_CALLS.length;
-    else this.runCallIndex = 0;
+    else { this.savePassFormation(); this.runCallIndex = 0; }
     this.runSelected = true;
     this.applyRunFormation();
     this.setTicker(`${this.selectedRunName} SELECTED - SNAP TO HAND OFF`);
@@ -1082,7 +1149,7 @@ export class GameEngine {
   changeSeasonPlay(dir: number) {
     const wasRun = this.runSelected;
     this.runSelected = false;
-    if (wasRun) this.setupPlay();
+    if (wasRun) this.restorePassFormation();
     this.syncSeasonPlaybook();
     this.seasonPlayIdx = (this.seasonPlayIdx + dir + this.seasonPlays.length) % this.seasonPlays.length;
     this.seasonPlayName = this.seasonPlays[this.seasonPlayIdx].name;
@@ -1094,7 +1161,7 @@ export class GameEngine {
     wrs.forEach((wr, i) => {
       const isRB = this.cfg.wr === 5 && i === 4;
       const rname = play?.routes[i] ?? (isRB ? 'flat' : 'go');
-      wr.route = buildRoute(rname, wr.x, this.los);
+      wr.route = buildRoute(rname, wr.x, this.los).map((pt) => ({ ...pt, y: this.los + (pt.y - this.los) * this.offDir }));
     });
   }
 
@@ -1449,6 +1516,7 @@ export class GameEngine {
           }
         }
       } else {
+        if (k === 'z' || k === 'x') { if (!e.repeat) this.selectSuggestedPlay(k === 'z' ? 'pass' : 'run'); return; }
         if (k === 'r') { this.selectRun(); return; }
         if (k === 'q' || k === '[') { this.changeSeasonPlay(-1); return; }
         if (k === 'e' || k === ']') { this.changeSeasonPlay(1); return; }
