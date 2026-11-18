@@ -459,8 +459,14 @@ export class GameEngine {
     this.ctx.imageSmoothingEnabled = false;
   }
 
-  /** horizontal focus point of the camera (fraction from left) */
+  /** Horizontal focus point of the camera (fraction from left). */
   get camBias() { return 0.28; }
+
+  /** Compress only the screen-vertical field axis; world distances stay unchanged. */
+  get fieldHeightScale() {
+    const usableHeight = this.vh - 220 - 140;
+    return Math.min(1, usableHeight / ((2 * FIELD_HALF_W + 6) * this.S));
+  }
 
   /** downfield yards visible to the left / right of the focus */
   camYMin() { return -ENDZONE_DEPTH - 2 + (this.vw * this.camBias) / this.S; }
@@ -471,7 +477,7 @@ export class GameEngine {
     return a > b ? (a + b) / 2 : clamp(y, a, b);
   }
   camXLimit() {
-    const halfView = this.vh / (2 * this.S);
+    const halfView = this.vh / (2 * this.S * this.fieldHeightScale);
     return Math.max(0, FIELD_HALF_W + 2.5 - halfView);
   }
   clampCamX(x: number) {
@@ -490,16 +496,20 @@ export class GameEngine {
       include(p.x, p.y);
       if (p.kind === 'wr') for (const point of p.route) include(point.x, point.y);
     }
-    // Account for sprites and the top scoreboard / bottom play-call panel.
-    minX -= 2.5; maxX += 2.5; minY -= 3; maxY += 3;
-    const left = 24, right = this.vw - 24;
-    const top = this.cfg.drill || this.cpuOffense ? 150 : 220, bottom = this.vh - (this.cfg.drill || this.cpuOffense ? 75 : 140);
-    const zoom = Math.min(1.15, (right - left) / ((maxY - minY) * this.S),
-      (bottom - top) / ((maxX - minX) * this.S));
-    this.cam.tzoom = Math.max(0.1, zoom);
-    const scale = this.S * this.cam.tzoom;
-    this.cam.ty = (minY + maxY) / 2 - ((left + right) / 2 - this.vw * this.camBias) / scale;
-    this.cam.tx = (minX + maxX) / 2 - ((top + bottom) / 2 - this.vh / 2) / scale;
+    const top = this.cfg.drill || this.cpuOffense ? 150 : 220;
+    const bottom = this.vh - (this.cfg.drill || this.cpuOffense ? 75 : 140);
+    const centerY = (top + bottom) / 2;
+    this.cam.tx = (minX + maxX) / 2 - (centerY - this.vh / 2) / (this.S * this.fieldHeightScale);
+    // Preserve horizontal scale and prioritize keeping every player on-screen.
+    // Deep routes may extend beyond the viewport, but never push the QB off it.
+    const desiredY = (minY + maxY) / 2 - (0.5 - this.camBias) * this.vw / this.S;
+    const playerYs = this.players.map((p) => p.y).concat(this.ball.y, this.los);
+    const minPlayerY = Math.min(...playerYs), maxPlayerY = Math.max(...playerYs);
+    const margin = 24;
+    const minCenter = maxPlayerY - (this.vw - margin - this.vw * this.camBias) / this.S;
+    const maxCenter = minPlayerY - (margin - this.vw * this.camBias) / this.S;
+    this.cam.ty = minCenter <= maxCenter ? clamp(desiredY, minCenter, maxCenter)
+      : (minPlayerY + maxPlayerY) / 2 - (0.5 - this.camBias) * this.vw / this.S;
   }
 
   // ---------------- lifecycle ----------------
@@ -792,7 +802,6 @@ export class GameEngine {
     this.playT = 0;
     this.cam.ty = this.clampCamY(los + 4 * dir);
     this.cam.tx = 0;
-    this.cam.tzoom = 1;
   }
 
   setupDrill() {
@@ -857,7 +866,6 @@ export class GameEngine {
     this.playT = 0;
     this.cam.tx = this.clampCamX(wx * 0.5);
     this.cam.ty = this.clampCamY(this.los + 10);
-    this.cam.tzoom = 1.05;
   }
 
   private resetPlayState() {
@@ -1228,9 +1236,9 @@ export class GameEngine {
     const rect = this.canvas.getBoundingClientRect();
     const bx = ((cx - rect.left) / rect.width) * this.vw;
     const by = ((cy - rect.top) / rect.height) * this.vh;
-    const S = this.S * this.cam.zoom;
+    const S = this.S;
     const wy = this.cam.y + (bx - this.vw * this.camBias) / S;   // downfield
-    const wx = this.cam.x + (by - this.vh / 2) / S;              // lateral
+    const wx = this.cam.x + (by - this.vh / 2) / (S * this.fieldHeightScale); // lateral
     return [wx, wy];
   }
 
@@ -1407,11 +1415,11 @@ export class GameEngine {
 
       if (slen > 8) {
         const qb = this.players[this.qbId];
-        const S = this.S * this.cam.zoom;
+        const S = this.S;
         // Convert screen drag to world throw direction (opposite of drag)
         // In side view: screen-X = downfield (+wy), screen-Y = lateral (+wx from bottom)
         const throwDownfield = -sdx / S;        // pulling left -> throw right (downfield)
-        const throwLateral   = -sdy / S;        // pulling up -> throw toward bottom of screen
+        const throwLateral   = -sdy / (S * this.fieldHeightScale);        // pulling up -> throw toward bottom of screen
 
         // Scale: short pull = short throw, long pull = deep throw
         const baseDist = 6 + this.aim.power * 36;
@@ -1575,7 +1583,6 @@ export class GameEngine {
     this.phase = 'play';
     this.play = 'qb';
     this.playT = 0;
-    this.cam.tzoom = 1;
     this.shellRevealT = 1.2;
     this.trauma = Math.min(1, this.trauma + 0.1);
     for (const p of this.players) {
@@ -1790,20 +1797,10 @@ export class GameEngine {
   fgInRange(): boolean { return this.fgDistance() <= 58; }
 
   private frameKickCamera(startY: number, endY: number) {
-    const span = Math.max(8, Math.abs(endY - startY));
-    const sideMargin = this.landscape ? 72 : 40;
-
-    this.cam.tzoom = clamp(
-      (this.vw - sideMargin * 2) / (span * this.S),
-      0.62,
-      1.08,
-    );
-
-    // Center the kick's start and finish in the downfield screen direction.
-    const screenOffset = (0.5 - this.camBias) * this.vw;
-    this.cam.ty =
-      (startY + endY) / 2 - screenOffset / (this.S * this.cam.tzoom);
-
+    // At fixed scale, keep the ball in view while looking toward the landing spot.
+    const lookAhead = clamp((endY - startY) / 2, -this.vw / this.S * 0.2, this.vw / this.S * 0.2);
+    const screenOffset = (0.5 - this.camBias) * this.vw / this.S;
+    this.cam.ty = startY + lookAhead - screenOffset;
     this.cam.tx = 0;
   }
 
@@ -1826,19 +1823,16 @@ export class GameEngine {
     this.offDir = (-(Math.sign(endY - startY) || 1)) as 1 | -1;
     this.cpuOffense = !returnToPlayer;
     this.cpuKickReturn = !returnToPlayer;
-    const zoom = this.cam.zoom, targetZoom = this.cam.tzoom;
     this.los = endY;
     this.ltg = clamp(endY + 10 * this.offDir, 0, FIELD_LENGTH);
     this.down = 1;
     this.convPlay = false;
     this.setupPlay();
-    this.cam.zoom = zoom;
-    this.cam.tzoom = targetZoom;
     this.positionKickReturn(this.kick.targetX ?? 0, this.kick.returnLane ?? 0);
     this.kickReturnActive = false;
     this.phase = 'kick';
     this.play = 'dead';
-    const initialOffset = (0.45 - this.camBias) * this.vw / (this.S * this.cam.zoom);
+    const initialOffset = (0.45 - this.camBias) * this.vw / this.S;
     this.cam.tx = 0;
     this.cam.ty = startY - initialOffset;
     this.setTicker(returnToPlayer
@@ -2071,7 +2065,6 @@ export class GameEngine {
     this.phase = 'play'; this.play = 'run'; this.playT = 0; this.deadT = 0;
     this.result = 'none';
     this.cam.tx = returner.x; this.cam.ty = returner.y + this.offDir * 5;
-    this.cam.tzoom = 1;
     this.setTicker(this.cpuOffense ? 'COVER THE KICK - Q SWITCH DEFENDER' : 'KICK RETURN - WASD / ARROWS TO RUN');
     audio.setCrowd(0.75);
   }
@@ -2213,7 +2206,6 @@ export class GameEngine {
       startY + (this.camBias * this.vw) / this.S - sideMargin,
     );
     this.cam.tx = 0;
-    this.cam.tzoom = 1;
     audio.setCrowd(1.4);
   }
 
@@ -2278,7 +2270,6 @@ export class GameEngine {
     this.cam.x = lerp(this.cam.x, cameraX, Math.min(1, dt * 4.5));
     const cameraY = this.phase === 'kick' || this.phase === 'presnap' ? this.cam.ty : this.clampCamY(this.cam.ty);
     this.cam.y = lerp(this.cam.y, cameraY, Math.min(1, dt * camLerp));
-    this.cam.zoom = lerp(this.cam.zoom, this.cam.tzoom, Math.min(1, dt * 4));
     this.tickerX -= dt * 46;
     if (this.tickerX < -2400) this.tickerX = 0;
 
@@ -3690,7 +3681,7 @@ export class GameEngine {
         for (const p of this.players) if (p.side === 'def') p.y = coveredY;
       }
       this.cam.tx = this.clampCamX(ballX);
-      const lookAhead = (0.52 - this.camBias) * this.vw / (this.S * this.cam.tzoom);
+      const lookAhead = (0.52 - this.camBias) * this.vw / this.S;
       this.cam.ty = ballY - lookAhead;
     }
     if (k.kind === 'punt') {
@@ -3896,7 +3887,6 @@ export class GameEngine {
 
     // Sync camera
     this.cam.tx = s.cam.tx; this.cam.ty = s.cam.ty;
-    this.cam.tzoom = s.cam.tzoom;
   }
 
   private render() {

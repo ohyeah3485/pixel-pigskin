@@ -32,10 +32,10 @@ export function renderAll(e: GameEngine) {
   const ctx = e.bctx;
   e.traumaShake(shakeTmp);
   const shx = shakeTmp[0], shy = shakeTmp[1];
-  const S = e.S * e.cam.zoom;
+  const S = e.S;
   const px: Proj = (wx, wy) => [
     e.vw * e.camBias + (wy - e.cam.y) * S + shx,
-    e.vh / 2 + (wx - e.cam.x) * S + shy,
+    e.vh / 2 + (wx - e.cam.x) * S * e.fieldHeightScale + shy,
   ];
 
   ctx.clearRect(0, 0, e.vw, e.vh);
@@ -168,7 +168,7 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
       ctx.strokeStyle = '#f4f7ee';
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(mx, my, 7 * S, 0, Math.PI * 2);
+      ctx.ellipse(mx, my, 7 * S, 7 * S * e.fieldHeightScale, 0, 0, Math.PI * 2);
       ctx.stroke();
       ctx.globalAlpha = 0.3;
       text(ctx, oT.abbr, mx, my, Math.max(10, S * 1.4), oT.c1 === '#000000' ? '#eaffea' : oT.c1);
@@ -310,7 +310,7 @@ function drawPlayer(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: n
     ctx.strokeStyle = padCol;
     ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.ellipse(sx, sy + 2, 1.25 * S, 0.5 * S, 0, 0, Math.PI * 2);
+    ctx.ellipse(sx, sy + 2, 1.25 * S, 0.5 * S * e.fieldHeightScale, 0, 0, Math.PI * 2);
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
@@ -720,7 +720,7 @@ function drawJoystick(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S:
   ctx.fill();
   ctx.globalAlpha = 0.8;
   ctx.beginPath();
-  ctx.arc(bx + e.joy.dy * S, by + e.joy.dx * S, 15, 0, Math.PI * 2);
+  ctx.arc(bx + e.joy.dy * S, by + e.joy.dx * S * e.fieldHeightScale, 15, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 1;
 }
@@ -809,13 +809,13 @@ function drawKickoffScene(
   ctx.globalAlpha = 0.16;
   ctx.fillStyle = '#ff7a1f';
   ctx.beginPath();
-  ctx.ellipse(ringX, ringY + 2, 1.65 * S * pulse, 0.68 * S * pulse, 0, 0, Math.PI * 2);
+  ctx.ellipse(ringX, ringY + 2, 1.65 * S * pulse, 0.68 * S * e.fieldHeightScale * pulse, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 0.95;
   ctx.strokeStyle = '#ff7a1f';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.ellipse(ringX, ringY + 2, 1.35 * S * pulse, 0.52 * S * pulse, 0, 0, Math.PI * 2);
+  ctx.ellipse(ringX, ringY + 2, 1.35 * S * pulse, 0.52 * S * e.fieldHeightScale * pulse, 0, 0, Math.PI * 2);
   ctx.stroke();
   ctx.globalAlpha = 1;
 
