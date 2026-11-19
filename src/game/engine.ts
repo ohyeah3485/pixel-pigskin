@@ -462,11 +462,8 @@ export class GameEngine {
   /** Horizontal focus point of the camera (fraction from left). */
   get camBias() { return 0.28; }
 
-  /** Compress only the screen-vertical field axis; world distances stay unchanged. */
-  get fieldHeightScale() {
-    const usableHeight = this.vh - 220 - 140;
-    return Math.min(1, usableHeight / ((2 * FIELD_HALF_W + 6) * this.S));
-  }
+  /** Slightly compress the screen-vertical field axis without changing world distances. */
+  get fieldHeightScale() { return 0.9; }
 
   /** downfield yards visible to the left / right of the focus */
   camYMin() { return -ENDZONE_DEPTH - 2 + (this.vw * this.camBias) / this.S; }
