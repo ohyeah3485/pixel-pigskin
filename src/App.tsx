@@ -11,6 +11,7 @@ import { GameOver } from './ui/GameOver';
 import { FranchiseHub } from './ui/FranchiseHub';
 import { FranchiseState, freshFranchise, loadFranchise, saveFranchise, advanceWeek, advancePlayoff, creditsForWin, creditsForLoss } from './game/franchise';
 import { network } from './network/client';
+import { Maximize2, Minimize2 } from 'lucide-react';
 
 const MODS_KEY = 'pixel-pigskin.mods';
 const TEAM_KEY = 'pixel-pigskin.team';
@@ -84,6 +85,31 @@ export default function App() {
 
   const engineRef = useRef<GameEngine | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const gameContainerRef = useRef<HTMLDivElement | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [fullscreenError, setFullscreenError] = useState('');
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === gameContainerRef.current && !!document.fullscreenElement);
+      setFullscreenError('');
+      engineRef.current?.resize();
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    const container = gameContainerRef.current;
+    if (!container) return;
+    try {
+      if (document.fullscreenElement === container) await document.exitFullscreen();
+      else if (container.requestFullscreen) await container.requestFullscreen();
+      else setFullscreenError('Fullscreen is not supported by this browser.');
+    } catch {
+      setFullscreenError('Fullscreen is unavailable here. Check browser or preview permissions.');
+    }
+  }, []);
   const modsRef = useRef(mods);
   modsRef.current = mods;
   const sideRef = useRef(side);
@@ -316,20 +342,20 @@ export default function App() {
 
       {/* -------- game screen -------- */}
       {screen === 'game' && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#020d06]">
-          {/* side dressing on wide screens */}
-          <div className="pointer-events-none absolute inset-0 hidden items-center justify-between xl:flex">
-            <div className="font-pixel rotate-180 text-[10px] tracking-[0.6em] text-[#123a1e]" style={{ writingMode: 'vertical-rl' }}>
-              PIXEL PIGSKIN
-            </div>
-            <div className="font-pixel text-[10px] tracking-[0.6em] text-[#123a1e]" style={{ writingMode: 'vertical-rl' }}>
-              EST 1995
-            </div>
-          </div>
-          <div className="relative">
-            <canvas ref={canvasRef} className="game-canvas block" style={{ touchAction: 'none' }} />
-            <RunPlayButton engineRef={engineRef} />
-          </div>
+        <div ref={gameContainerRef} className="absolute inset-0 z-30 overflow-hidden bg-[#020d06]">
+          <canvas ref={canvasRef} className="game-canvas block" style={{ touchAction: 'none' }} />
+          <RunPlayButton engineRef={engineRef} />
+          <button
+            type="button"
+            onClick={(event) => { event.currentTarget.blur(); void toggleFullscreen(); }}
+            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            className="absolute right-3 top-1/2 z-40 flex -translate-y-1/2 items-center gap-1 border border-[#4b8b58] bg-[#05160b]/90 px-2 py-2 font-pixel text-[7px] text-[#d8f8d4] hover:bg-[#1d5c33] focus-visible:outline-2 focus-visible:outline-[#aaff3c]"
+          >
+            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            <span className="hidden sm:inline">{isFullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}</span>
+          </button>
+          {fullscreenError && <div role="status" className="absolute right-3 top-[57%] z-40 max-w-64 bg-[#21060c] p-2 text-xs text-white">{fullscreenError}</div>}
         </div>
       )}
 

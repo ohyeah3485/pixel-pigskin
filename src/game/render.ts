@@ -231,7 +231,7 @@ function drawField(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: nu
       const [s0x, s0y] = px(wr.x, wr.y);
       ctx.moveTo(s0x, s0y);
       for (const r of wr.route) {
-        const [sx, sy] = px(r.x, r.y);
+        const [sx, sy] = px(r.x, clamp(r.y, -ENDZONE_DEPTH, FIELD_LENGTH + ENDZONE_DEPTH));
         ctx.lineTo(sx, sy);
       }
       ctx.stroke();

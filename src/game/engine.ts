@@ -433,29 +433,25 @@ export class GameEngine {
   }
 
   resize() {
-    const aw = Math.max(320, window.innerWidth);
-    const ah = Math.max(320, window.innerHeight);
-    const landscape = aw / ah > 1.1;
+    const aw = Math.max(1, window.innerWidth);
+    const ah = Math.max(1, window.innerHeight);
+    const aspect = aw / ah;
+    const landscape = aspect > 1.1;
     this.landscape = landscape;
-    const vw = landscape ? 960 : 600;
-    const vh = landscape ? 600 : 860;
-    if (vw !== this.vw || vh !== this.vh || this.buf.width !== vw) {
+    // Extend the logical viewport to match the screen instead of letterboxing it.
+    const vw = landscape ? Math.round(600 * aspect) : 600;
+    const vh = landscape ? 600 : Math.round(600 / aspect);
+    if (vw !== this.vw || vh !== this.vh || this.buf.width !== vw || this.buf.height !== vh) {
       this.vw = vw; this.vh = vh;
       this.buf.width = vw; this.buf.height = vh;
     }
-    // SIDE VIEW: downfield runs along screen X, field width along screen Y.
-    // Show ~62 yards of field downfield in landscape, ~40 in portrait.
-    this.S = landscape ? vw / 86 : vw / 52;
-
-    const aspect = vw / vh;
-    let w = aw;
-    let h = w / aspect;
-    if (h > ah) { h = ah; w = h * aspect; }
+    // Keep yards the same size as before; extra screen width shows more field.
+    this.S = landscape ? 960 / 86 : 600 / 52;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this.canvas.style.width = `${Math.round(w)}px`;
-    this.canvas.style.height = `${Math.round(h)}px`;
-    this.canvas.width = Math.round(w * dpr);
-    this.canvas.height = Math.round(h * dpr);
+    this.canvas.style.width = `${aw}px`;
+    this.canvas.style.height = `${ah}px`;
+    this.canvas.width = Math.round(aw * dpr);
+    this.canvas.height = Math.round(ah * dpr);
     this.ctx.imageSmoothingEnabled = false;
   }
 
@@ -491,7 +487,7 @@ export class GameEngine {
     };
     for (const p of this.players) {
       include(p.x, p.y);
-      if (p.kind === 'wr') for (const point of p.route) include(point.x, point.y);
+      if (p.kind === 'wr') for (const point of p.route) include(point.x, clamp(point.y, -ENDZONE_DEPTH, FIELD_LENGTH + ENDZONE_DEPTH));
     }
     const top = this.cfg.drill || this.cpuOffense ? 150 : 220;
     const bottom = this.vh - (this.cfg.drill || this.cpuOffense ? 75 : 140);
@@ -505,8 +501,10 @@ export class GameEngine {
     const margin = 24;
     const minCenter = maxPlayerY - (this.vw - margin - this.vw * this.camBias) / this.S;
     const maxCenter = minPlayerY - (margin - this.vw * this.camBias) / this.S;
-    this.cam.ty = minCenter <= maxCenter ? clamp(desiredY, minCenter, maxCenter)
+    const formationCenter = minCenter <= maxCenter ? clamp(desiredY, minCenter, maxCenter)
       : (minPlayerY + maxPlayerY) / 2 - (0.5 - this.camBias) * this.vw / this.S;
+    // Don't chase route endpoints into the space beyond the end zones.
+    this.cam.ty = this.clampCamY(formationCenter);
   }
 
   // ---------------- lifecycle ----------------
@@ -1472,6 +1470,12 @@ export class GameEngine {
   private handleKey(e: KeyboardEvent, down: boolean) {
     const raw = e.key.toLowerCase();
     const k = raw === ' ' ? 'space' : raw;
+    const target = e.target;
+    if (typeof HTMLElement !== 'undefined' && target instanceof HTMLElement &&
+        (target.isContentEditable || /^(BUTTON|INPUT|SELECT|TEXTAREA|A)$/.test(target.tagName))) {
+      if (!down) { this.keys[k] = false; this.sprinting = !!this.keys['shift']; }
+      return;
+    }
     if (down && ['space', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
     this.keys[k] = down;
     this.sprinting = !!this.keys['shift'];
