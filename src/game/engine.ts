@@ -711,7 +711,7 @@ export class GameEngine {
       this.ltg = clamp(this.los + 10 * this.offDir, 0, FIELD_LENGTH);
       this.down = 1;
       this.setupPlay();
-      if (this.cpuOffense) this.switchDefender(true);
+      if (this.cpuOffense) this.switchDefender();
     }
     this.phase = 'presnap';
     this.presnapT = 0;
@@ -2021,7 +2021,7 @@ export class GameEngine {
     const current = DEF_FRONT_OPTIONS.indexOf(this.defenseFormation);
     this.defenseFormation = DEF_FRONT_OPTIONS[(current + 1) % DEF_FRONT_OPTIONS.length];
     this.setupPlay();
-    this.switchDefender(true);
+    this.switchDefender();
     this.phase = 'presnap';
     this.presnapT = 0;
     this.setTicker(`DEFENSE: ${this.defenseFormation} — press F to change`);
@@ -2048,15 +2048,23 @@ export class GameEngine {
     this.endPlay('inc', b.tx, b.ty, 0.4);
   }
 
-  switchDefender(nearest = false) {
+  switchDefender() {
     if (!this.cpuOffense) return;
-    const defenders = this.players.filter(p => p.side === 'def' && p.state !== 'down' && p.state !== 'tackled');
+    const defenders = this.players.filter((p) => p.side === 'def' && p.stun <= 0 &&
+      p.state !== 'down' && p.state !== 'tackled' && p.state !== 'whiff' && p.state !== 'tackling');
     if (!defenders.length) return;
-    const focus = this.carrier() ?? this.players[this.qbId];
-    if (nearest && focus) defenders.sort((a, b) => dist(a.x, a.y, focus.x, focus.y) - dist(b.x, b.y, focus.x, focus.y));
-    const index = nearest ? 0 : (defenders.findIndex(p => p.id === this.ctrlId) + 1) % defenders.length;
+    const focus = this.play === 'air' && this.ball.state === 'air'
+      ? { x: this.ball.tx, y: this.ball.ty }
+      : this.handoffInProgress
+        ? { x: this.handoffToX, y: this.handoffToY }
+        : this.carrier() ?? this.players.find((p) => p.id === this.qbId) ?? this.ball;
+    // Keep control of the current player if already nearest, including exact ties.
+    defenders.sort((a, b) => {
+      const delta = dist(a.x, a.y, focus.x, focus.y) - dist(b.x, b.y, focus.x, focus.y);
+      return delta || Number(b.id === this.ctrlId) - Number(a.id === this.ctrlId);
+    });
     for (const p of this.players) if (p.side === 'def') p.ctrl = false;
-    const selected = defenders[index];
+    const selected = defenders[0];
     selected.ctrl = true; selected.pad = 0;
     this.ctrlId = selected.id; this.ctrlId2 = -1;
   }
@@ -2076,9 +2084,9 @@ export class GameEngine {
   private startCpuSnap() {
     this.runSelected = false;
     this.setupPlay();
-    this.switchDefender(true);
+    this.switchDefender();
     this.phase = 'presnap'; this.presnapT = 0;
-    this.setTicker('DEFEND - Q SWITCH DEFENDER');
+    this.setTicker('DEFEND - Q NEAREST DEFENDER');
   }
 
   private updateCpuOffense() {
@@ -2146,14 +2154,14 @@ export class GameEngine {
     this.ctrlId = this.cpuOffense ? -1 : returner.id; this.ctrlId2 = -1;
     this.kickReturnActive = true;
     this.becomeCarrier(returner);
-    if (this.cpuOffense) this.switchDefender(true);
+    if (this.cpuOffense) this.switchDefender();
     returner.anim = 'catch'; returner.animT = 0; returner.armT = 0.25;
     this.ball.state = 'held'; this.ball.x = returner.x; this.ball.y = returner.y;
     this.ball.z = 1; this.ball.wrId = -1;
     this.phase = 'play'; this.play = 'run'; this.playT = 0; this.deadT = 0;
     this.result = 'none';
     this.cam.tx = returner.x; this.cam.ty = returner.y + this.offDir * 5;
-    this.setTicker(this.cpuOffense ? 'COVER THE KICK - Q SWITCH DEFENDER' : 'KICK RETURN - WASD / ARROWS TO RUN');
+    this.setTicker(this.cpuOffense ? 'COVER THE KICK - Q NEAREST DEFENDER' : 'KICK RETURN - WASD / ARROWS TO RUN');
     audio.setCrowd(0.75);
   }
 

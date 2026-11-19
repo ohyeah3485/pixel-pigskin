@@ -1250,7 +1250,7 @@ function drawButtons(e: GameEngine, ctx: CanvasRenderingContext2D) {
   }
 
   if (e.cpuOffense && e.isTouch && (e.phase === 'presnap' || e.phase === 'play')) {
-    const switchPlayer: UIButton = { id: 'switchDefender', x: e.vw - 142, y: base - 90, w: 120, h: 48, label: 'SWITCH', sub: 'DEFENDER', color: '#ffd94d', cb: () => e.switchDefender() };
+    const switchPlayer: UIButton = { id: 'switchDefender', x: e.vw - 142, y: base - 90, w: 120, h: 48, label: 'SWITCH', sub: 'NEAREST', color: '#ffd94d', cb: () => e.switchDefender() };
     styledButton(ctx, switchPlayer, '#3f3312');
     e.ui.push(switchPlayer);
   }
@@ -1524,11 +1524,11 @@ function drawHints(e: GameEngine, ctx: CanvasRenderingContext2D) {
   if (e.isTouch || e.phase === 'over' || e.phase === 'banner') return;
   let hints: string[] = [];
   if (e.phase === 'presnap') {
-    hints = e.cpuOffense ? ['WASD MOVE', 'Q SWITCH DEFENDER', 'F CHANGE DEFENSE'] : e.cfg.drill
+    hints = e.cpuOffense ? ['WASD MOVE', 'Q NEAREST DEFENDER', 'F CHANGE DEFENSE'] : e.cfg.drill
       ? (e.twoP ? ['SPACE SNAP', 'WASD P1', 'IJKL P2', 'ESC PAUSE'] : ['SPACE SNAP', 'WASD MOVE', 'ESC PAUSE'])
       : ['Q/E PLAY', 'R RUN', 'Z/X COACH PICKS', '1-6 TARGET'];
   } else if (e.phase === 'play' && e.cpuOffense) {
-    hints = ['WASD MOVE', 'Q SWITCH DEFENDER', 'SPACE SWAT (PASS IN AIR)'];
+    hints = ['WASD MOVE', 'Q NEAREST DEFENDER', 'SPACE SWAT (PASS IN AIR)'];
   } else if (e.phase === 'play' && e.cfg.drill) {
     hints = e.twoP ? ['WASD P1', 'IJKL P2', 'F/P ACTION'] : ['WASD MOVE', 'F ACTION', e.cfg.practice ? 'N RESET REP' : 'R RESET'];
   } else if (e.phase === 'play' && e.play === 'qb') {
