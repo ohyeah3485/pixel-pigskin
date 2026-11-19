@@ -1,7 +1,7 @@
 import { audio } from './audio';
 import { playRandomQbCall } from './qbAudio';
 import { Fx } from './fx';
-import { MODES, Mods, ModeCfg, ModeId, FinalStats, DrillSide, Shell, SHELL_NAME } from './types';
+import { MODES, Mods, ModeCfg, ModeId, FinalStats, DrillSide, PracticeDrill, Shell, SHELL_NAME } from './types';
 import { Team, getTeam, randomOpponent } from './teams';
 import { renderAll } from './render';
 
@@ -239,6 +239,7 @@ export class GameEngine {
   cfg: ModeCfg = MODES.arcade;
   mods: Mods = { bigHead: false, moonBall: false, turbo: false, blitz: false };
   drillSide: DrillSide = 'wr';
+  practiceDrill: PracticeDrill = 'scrimmage';
   twoP = false;
   wrId2 = -1;
   dbId2 = -1;
@@ -509,8 +510,11 @@ export class GameEngine {
 
   // ---------------- lifecycle ----------------
 
-  start(mode: ModeId, mods: Mods, drillSide: DrillSide = 'wr', twoPlayer = false, teamId = 'kc', oppId?: string) {
-    this.cfg = MODES[mode];
+  start(mode: ModeId, mods: Mods, drillSide: DrillSide = 'wr', twoPlayer = false, teamId = 'kc', oppId?: string, practiceDrill: PracticeDrill = 'scrimmage') {
+    this.practiceDrill = mode === 'practice' ? practiceDrill : 'scrimmage';
+    const individual = mode === 'practice' && (practiceDrill === 'catching' || practiceDrill === 'coverage');
+    this.cfg = individual ? { ...MODES.one1, id: 'practice', key: 'practice', name: 'PRACTICE', practice: true, reps: 0 } : MODES[mode];
+    if (individual) drillSide = practiceDrill === 'coverage' ? 'db' : 'wr';
     this.mods = { ...mods };
     this.drillSide = drillSide;
     this.twoP = mode === 'one1' && twoPlayer;
@@ -559,7 +563,14 @@ export class GameEngine {
     audio.setCrowd(0.55);
     this.paused = false;
 
-    if (this.cfg.drill) {
+    if (mode === 'practice') {
+      this.beginPracticeRep(false);
+      this.showBanner([
+        { txt: 'PRACTICE: ' + this.practiceName(), col: '#c5ff6b', size: 12 },
+        { txt: 'UNLIMITED REPS - N RESETS', col: '#ffffff', size: 8 },
+        { txt: this.practiceInstructions(), col: '#ffd94d', size: 8 },
+      ], 2.2, false, () => { this.phase = 'presnap'; this.presnapT = 0; });
+    } else if (this.cfg.drill) {
       this.setupDrill();
       const l1 = drillSide === 'wr' ? 'P1 = RECEIVER' : 'P1 = DEFENDER';
       const l2 = drillSide === 'wr' ? 'P2 = DEFENDER' : 'P2 = RECEIVER';
@@ -665,6 +676,53 @@ export class GameEngine {
     if (this.mods.blitz) return r < 0.45 ? 'blitz' : r < 0.75 ? 'man' : 'cover3';
     if (this.down >= 3) return r < 0.3 ? 'blitz' : r < 0.55 ? 'cover3' : r < 0.8 ? 'man' : 'cover2';
     return r < 0.12 ? 'blitz' : r < 0.42 ? 'man' : r < 0.72 ? 'cover3' : 'cover2';
+  }
+
+  practiceName(): string {
+    const names: Record<PracticeDrill, string> = {
+      scrimmage: 'FREE PRACTICE', running: 'RUNNING', passing: 'PASSING',
+      catching: '1V1 CATCHING', coverage: '1V1 COVERAGE', defense: 'TEAM DEFENSE', redzone: 'RED ZONE',
+    };
+    return names[this.practiceDrill];
+  }
+
+  private practiceInstructions(): string {
+    if (this.practiceDrill === 'catching') return 'WASD MOVE - F CALL BALL';
+    if (this.practiceDrill === 'coverage') return 'WASD COVER - F SWAT / TACKLE';
+    if (this.practiceDrill === 'defense') return 'Q SWITCH - F FRONT - SPACE SWAT';
+    if (this.practiceDrill === 'running') return 'SPACE SNAP - RUN - SPACE TRUCK';
+    return 'CHOOSE PLAY - SNAP - THROW OR RUN';
+  }
+
+  private beginPracticeRep(count = true) {
+    if (count) this.rep++;
+    this.runSelected = false;
+    this.cpuKickReturn = false;
+    this.kickReturnActive = false;
+    this.convPlay = false;
+    this.truckCooldown = 0;
+    this.carryStam = [1, 1];
+    this.cpuOffense = this.practiceDrill === 'defense';
+    this.offDir = this.cpuOffense ? -1 : 1;
+    if (this.cfg.drill) {
+      this.setupDrill();
+    } else {
+      this.los = this.practiceDrill === 'redzone' ? FIELD_LENGTH - 15 : this.cpuOffense ? FIELD_LENGTH - 35 : 35;
+      this.ltg = clamp(this.los + 10 * this.offDir, 0, FIELD_LENGTH);
+      this.down = 1;
+      this.setupPlay();
+      if (this.cpuOffense) this.switchDefender(true);
+    }
+    this.phase = 'presnap';
+    this.presnapT = 0;
+    if (this.practiceDrill === 'running') this.selectRun();
+    this.setTicker(`PRACTICE ${this.practiceName()} - REP ${this.rep + 1} - ${this.practiceInstructions()} - N RESET`);
+  }
+
+  resetPractice() {
+    if (!this.cfg.practice || this.paused || (this.phase !== 'presnap' && this.phase !== 'play' && this.phase !== 'banner')) return;
+    this.banner = null;
+    this.beginPracticeRep();
   }
 
   // ---------------- setup ----------------
@@ -1186,7 +1244,9 @@ export class GameEngine {
   actionFor(pad: number): import('./types').ActionKind {
     if (!this.cfg.drill || this.phase !== 'play') return null;
     const me = pad === 0 ? this.players[this.ctrlId] : this.players[this.ctrlId2];
-    if (!me || me.side !== 'off') return null;
+    if (!me) return null;
+    if (me.side === 'def' && !this.gassedFor(pad) && me.gambleCd <= 0 && (this.ball.state === 'air' || this.carrier())) return 'defend';
+    if (me.side !== 'off') return null;
     if (me.stumble > 0 || me.gambleCd > 0) return null;
     if (me.gassed > 0 || me.stam < GameEngine.MIN_STAM) return null;
     if (this.play === 'qb' && this.ball.state === 'held' && !this.forceDrillThrow) return 'call_ball';
@@ -1204,7 +1264,26 @@ export class GameEngine {
   drillAction(pad = 0) {
     if (!this.cfg.drill) return;
     const me = pad === 0 ? this.players[this.ctrlId] : this.players[this.ctrlId2];
-    if (!me || me.side !== 'off' || me.stumble > 0 || me.gambleCd > 0) return;
+    if (!me || me.stumble > 0 || me.gambleCd > 0) return;
+    if (me.side === 'def') {
+      if (this.ball.state === 'air' && this.play === 'air') {
+        if (dist(me.x, me.y, this.ball.x, this.ball.y) > 4.5) return;
+        me.anim = 'catch'; me.armT = 0.3;
+        this.setCd(me, 0.6);
+        if (Math.random() < 0.3) { this.ball.state = 'loose'; this.drillBreakup(this.ball, me); }
+        else this.fx.popup(me.x, me.y, 'MISSED SWAT', '#ffd94d', 6);
+        return;
+      }
+      const car = this.carrier();
+      if (!car || me.gassed > 0 || me.stam < GameEngine.MIN_STAM) return;
+      this.burn(me, COST.tackle);
+      this.setCd(me, 0.8);
+      me.state = 'dive'; me.diveT = 0.42; me.anim = 'dive'; me.animT = 0;
+      const a = Math.atan2(car.y - me.y, car.x - me.x);
+      me.vx = Math.cos(a) * 13; me.vy = Math.sin(a) * 13; me.face = a;
+      return;
+    }
+    if (me.side !== 'off') return;
     if (me.gassed > 0 || me.stam < GameEngine.MIN_STAM) {
       this.setResult(me, 'TOO GASSED', false);
       this.fx.popup(me.x, me.y, 'NO GAS!', '#ff6b6b', 7);
@@ -1272,7 +1351,13 @@ export class GameEngine {
     if (this.phase !== 'play') return;
 
     const [wx, wy] = this.toWorld(e.clientX, e.clientY);
-    if (this.cfg.drill) { if (e.button === 0) this.drillAction(0); return; }
+    if (this.cfg.drill) {
+      if (e.pointerType !== 'mouse') {
+        this.joy.active = true; this.joy.id = e.pointerId;
+        this.joy.bx = wx; this.joy.by = wy; this.joy.dx = 0; this.joy.dy = 0;
+      } else if (e.button === 0) this.drillAction(0);
+      return;
+    }
 
     if (this.play === 'qb') {
       if (e.button === 2) { this.startScramble(); return; }
@@ -1486,6 +1571,7 @@ export class GameEngine {
     if (k === 'escape' || (k === 'p' && !p2Playing)) { this.setPaused(!this.paused); return; }
     if (this.paused) return;
     audio.ensure();
+    if (k === 'n' && this.cfg.practice) { if (!e.repeat) this.resetPractice(); return; }
 
     if (k === 'q' && this.cpuOffense && (this.phase === 'play' || this.phase === 'presnap')) {
       if (!e.repeat) this.switchDefender();
@@ -1553,8 +1639,8 @@ export class GameEngine {
       return;
     }
     if (this.cfg.drill) {
-      if (k === 'f' || k === 'space') this.drillAction(0);
-      else if (k === 'p' && this.twoP) this.drillAction(1);
+      if ((k === 'f' || k === 'space') && !e.repeat) this.drillAction(0);
+      else if (k === 'p' && this.twoP && !e.repeat) this.drillAction(1);
       else if (k === 'r' && !this.twoP) this.endRep('whistle');
       return;
     }
@@ -1596,7 +1682,7 @@ export class GameEngine {
         if (wr && dist(p.x, p.y, wr.x, wr.y) < 2.2) wr.jam = 0.25;
       }
     }
-    this.setTicker(this.cfg.drill ? `REP ${this.rep + 1} OF ${this.cfg.reps}` : this.downAndDist());
+    this.setTicker(this.cfg.practice ? `PRACTICE ${this.practiceName()} - REP ${this.rep + 1}` : this.cfg.drill ? `REP ${this.rep + 1} OF ${this.cfg.reps}` : this.downAndDist());
     if (!this.cfg.drill && this.runSelected) { this.startRunHandoff(); this.runSelected = false; }
   }
 
@@ -1941,7 +2027,7 @@ export class GameEngine {
     this.setTicker(`DEFENSE: ${this.defenseFormation} — press F to change`);
   }
 
-  private trySwatPass() {
+  trySwatPass() {
     const b = this.ball;
     if (this.play !== 'air' || b.state !== 'air' || !this.cpuOffense) return;
     const defender = this.players.find((p) =>
@@ -1954,6 +2040,7 @@ export class GameEngine {
       this.fx.popup(defender.x, defender.y, 'MISSED SWAT', '#ffd94d', 6);
       return;
     }
+    b.state = 'loose';
     this.stats.breakups++;
     this.fx.popup(defender.x, defender.y, 'SWATTED!', '#4dd8ff', 7);
     this.fx.puff(b.x, b.y);
@@ -3164,6 +3251,11 @@ export class GameEngine {
       }
 
       this.aim.wrId = -1;
+      if (this.cfg.practice && this.practiceDrill === 'passing' && !this.cpuOffense) {
+        this.stats.passYds += Math.max(0, Math.round((wr.y - this.los) * this.offDir));
+        this.setTicker('COMPLETION - NEXT REP');
+        this.endPlay('whistle', wr.x, wr.y, 0.2);
+      }
     } else if (picker && dbD <= 1.6 && dbD < 1.0) {
       if (this.cfg.practice) {
         this.fx.popup(picker.x, picker.y, 'DROPPED PICK!', '#ffd94d', 7);
@@ -3236,6 +3328,13 @@ export class GameEngine {
     this.play = 'dead';
     this.result = result;
     this.deadT = 1.35;
+    if (this.cfg.practice) {
+      const labels: Record<DeadResult, string> = { none: 'REP COMPLETE', tackle: 'TACKLE', oob: 'OUT OF BOUNDS', inc: 'INCOMPLETE', sack: 'SACK', int: 'INTERCEPTION', td: 'TOUCHDOWN', whistle: 'RESET', breakup: 'PASS BROKEN UP' };
+      this.repMsg = labels[result];
+      this.setTicker(`${this.repMsg} - NEXT REP`);
+      if (result !== 'td') audio.whistle(0.3, 0.35);
+      return;
+    }
     const youWR = this.drillSide === 'wr';
     let msg = '';
     const beforeYou = this.drillYou, beforeOpp = this.drillOpp;
@@ -3268,6 +3367,7 @@ export class GameEngine {
   }
 
   private nextRep() {
+    if (this.cfg.practice) { this.beginPracticeRep(); return; }
     this.rep++;
     const wr = this.wrId2 >= 0 ? this.players[this.wrId2] : null;
     const db = this.dbId2 >= 0 ? this.players[this.dbId2] : null;
@@ -3339,6 +3439,11 @@ export class GameEngine {
     audio.cheer(1.4);
 
     if (this.cfg.drill) { this.stats.tds++; this.endRep('td'); return; }
+    if (this.cfg.practice) {
+      if (!this.cpuOffense) { this.stats.tds++; this.registerYards(car); }
+      this.showBanner([{ txt: 'TOUCHDOWN - NEXT REP', col: '#aaff3c', size: 12 }], 1.4, false, () => this.beginPracticeRep());
+      return;
+    }
     const c = this.cfg;
     if (this.cpuOffense) {
       const cpuPoints = c.tdPoints + (c.conv === 'kick' ? 1 : 0);
@@ -3389,6 +3494,12 @@ export class GameEngine {
     if (this.result === 'td') return;
     const r = this.result;
     this.result = 'none';
+    if (c.practice) {
+      const car = this.carrier();
+      if (car && (r === 'tackle' || r === 'oob')) this.registerYards(car);
+      this.beginPracticeRep();
+      return;
+    }
 
     if (this.kickReturnActive && this.cpuKickReturn) {
       const spot = this.endY;

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { GameEngine } from './game/engine';
-import { DrillSide, FinalStats, ModeId, Mods } from './game/types';
+import { DrillSide, FinalStats, ModeId, Mods, PracticeDrill } from './game/types';
 import { MainMenu } from './ui/MainMenu';
 import { ModsModal, ScoresModal, HelpModal } from './ui/Modals';
 import { PauseOverlay } from './ui/PauseOverlay';
@@ -85,6 +85,7 @@ export default function App() {
 
   const engineRef = useRef<GameEngine | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const practiceDrillRef = useRef<PracticeDrill>('scrimmage');
   const gameContainerRef = useRef<HTMLDivElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fullscreenError, setFullscreenError] = useState('');
@@ -127,7 +128,7 @@ export default function App() {
       onOver: (s) => { setResults({ ...s }); if (franchiseRef.current) franchiseResult(s); },
     });
     engineRef.current = engine;
-    engine.start(mode, modsRef.current, sideRef.current, twoPRef.current, teamsRef.current.teamId, teamsRef.current.oppId ?? undefined);
+    engine.start(mode, modsRef.current, sideRef.current, twoPRef.current, teamsRef.current.teamId, teamsRef.current.oppId ?? undefined, practiceDrillRef.current);
     return () => {
       engine.destroy();
       engineRef.current = null;
@@ -135,7 +136,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen]);
 
-  const play = useCallback((m: ModeId, s: DrillSide, two: boolean) => {
+  const play = useCallback((m: ModeId, s: DrillSide, two: boolean, practiceDrill: PracticeDrill = 'scrimmage') => {
+    practiceDrillRef.current = practiceDrill;
     setMode(m);
     setSide(s);
     sideRef.current = s;
@@ -150,7 +152,7 @@ export default function App() {
   const restart = useCallback(() => {
     setResults(null);
     setPaused(false);
-    engineRef.current?.start(mode, modsRef.current, sideRef.current, twoPRef.current, teamsRef.current.teamId, teamsRef.current.oppId ?? undefined);
+    engineRef.current?.start(mode, modsRef.current, sideRef.current, twoPRef.current, teamsRef.current.teamId, teamsRef.current.oppId ?? undefined, practiceDrillRef.current);
   }, [mode]);
 
   const resume = useCallback(() => {

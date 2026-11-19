@@ -3,13 +3,13 @@ import {
   Trophy, Users, Swords, UsersRound, Dumbbell, Zap, Medal, CircleHelp, Crown,
   Keyboard, Mouse, ChevronRight, Shield, Hand,
 } from 'lucide-react';
-import { MODES, ModeId, Mods, modsTag, DrillSide } from '../game/types';
+import { MODES, ModeId, Mods, modsTag, DrillSide, PracticeDrill } from '../game/types';
 import { bestScore } from '../game/highscores';
 import { getTeam, overall, inkOn } from '../game/teams';
 import { audio } from '../game/audio';
 
 interface Props {
-  onPlay: (mode: ModeId, side: DrillSide, twoPlayer: boolean) => void;
+  onPlay: (mode: ModeId, side: DrillSide, twoPlayer: boolean, practiceDrill?: PracticeDrill) => void;
   onFranchise: (teamId: string) => void;
   onOpenOnline: () => void;
   onOpenMods: () => void;
@@ -38,14 +38,25 @@ const FEATURES: Record<ModeId, string[]> = {
   seven7: ['Six receivers, loaded coverage', 'No QB runs allowed', '1 & 2 point conversion plays', 'Pure timing + reads'],
   one1: ['Pick your side each game', 'AI quarterback throws live', 'Dive tackles with real whiffs', '8 reps, best score wins'],
   two2: ['Alternating offensive drives', 'Pick a franchise each', 'Full special teams', 'Winner banner + rematch'],
-  practice: ['Unlimited downs', 'Soft scout-team coverage', 'R resets the rep', 'No pressure, all reps'],
+  practice: ['Seven focused training drills', 'Unlimited repeatable reps', 'Reset anytime with N', 'No clock or game-over pressure'],
 };
+
+const PRACTICE_DRILLS: { id: PracticeDrill; name: string; description: string }[] = [
+  { id: 'scrimmage', name: 'FREE PRACTICE', description: 'Call any run or pass against the scout team.' },
+  { id: 'running', name: 'RUNNING', description: 'Start with a run selected; practice lanes, cuts and trucks.' },
+  { id: 'passing', name: 'PASSING', description: 'Work on reads, quick passes and timing against coverage.' },
+  { id: 'catching', name: '1V1 CATCHING', description: 'Control the receiver against a defender and call for the ball.' },
+  { id: 'coverage', name: '1V1 COVERAGE', description: 'Control the defender, contest passes and tackle the receiver.' },
+  { id: 'defense', name: 'TEAM DEFENSE', description: 'Defend CPU runs and passes; switch, swat and change fronts.' },
+  { id: 'redzone', name: 'RED ZONE', description: 'Repeat short-field plays near the goal line.' },
+];
 
 export function MainMenu({ onPlay, onFranchise, onOpenOnline, onOpenMods, onOpenScores, onOpenHelp, onOpenTeams, mods, blockKeys, teamId, oppId, hasSave }: Props) {
   void hasSave; // used below
   const [sel, setSel] = useState(0);
   const [side, setSide] = useState<DrillSide>('wr');
   const [vsLocal, setVsLocal] = useState(false);
+  const [practiceDrill, setPracticeDrill] = useState<PracticeDrill>('scrimmage');
   const tag = modsTag(mods);
   const myTeam = getTeam(teamId);
   const foeTeam = oppId ? getTeam(oppId) : null;
@@ -57,8 +68,8 @@ export function MainMenu({ onPlay, onFranchise, onOpenOnline, onOpenMods, onOpen
   const launch = useCallback(() => {
     audio.ensure();
     audio.uiClick();
-    onPlay(ORDER[sel], side, vsLocal);
-  }, [onPlay, sel, side, vsLocal]);
+    onPlay(ORDER[sel], side, vsLocal, practiceDrill);
+  }, [onPlay, sel, side, vsLocal, practiceDrill]);
 
   useEffect(() => {
     if (blockKeys) return;
@@ -66,6 +77,12 @@ export function MainMenu({ onPlay, onFranchise, onOpenOnline, onOpenMods, onOpen
       const k = e.key.toLowerCase();
       if (k === 'arrowdown' || k === 's') { e.preventDefault(); setSel((s) => (s + 1) % ORDER.length); audio.uiHover(); }
       else if (k === 'arrowup' || k === 'w') { e.preventDefault(); setSel((s) => (s - 1 + ORDER.length) % ORDER.length); audio.uiHover(); }
+      else if ((k === 'arrowleft' || k === 'a' || k === 'arrowright' || k === 'd') && ORDER[sel] === 'practice') {
+        e.preventDefault();
+        const delta = k === 'arrowleft' || k === 'a' ? -1 : 1;
+        setPracticeDrill((current) => PRACTICE_DRILLS[(PRACTICE_DRILLS.findIndex((d) => d.id === current) + delta + PRACTICE_DRILLS.length) % PRACTICE_DRILLS.length].id);
+        audio.uiHover();
+      }
       else if ((k === 'arrowleft' || k === 'a') && MODES[ORDER[sel]].drill) { setSide('wr'); audio.uiHover(); }
       else if ((k === 'arrowright' || k === 'd') && MODES[ORDER[sel]].drill) { setSide('db'); audio.uiHover(); }
       else if (k === 'enter' || k === ' ') { e.preventDefault(); launch(); }
@@ -203,6 +220,23 @@ export function MainMenu({ onPlay, onFranchise, onOpenOnline, onOpenMods, onOpen
               </div>
             ))}
           </div>
+
+          {mode.id === 'practice' && (
+            <div className="mt-5 border-2 border-[#aaff3c] bg-[#061609] p-3">
+              <div className="font-pixel mb-3 text-[8px] text-[#aaff3c]">CHOOSE A DRILL — CLICK OR USE LEFT / RIGHT</div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {PRACTICE_DRILLS.map((drill) => (
+                  <button key={drill.id} type="button" aria-pressed={practiceDrill === drill.id}
+                    onClick={() => { audio.uiClick(); setPracticeDrill(drill.id); }}
+                    className={`mode-card border-2 p-2 text-left ${practiceDrill === drill.id ? 'border-[#aaff3c] bg-[#1d5c33]' : 'border-[#174626] bg-[#0a2216]'}`}>
+                    <span className="font-pixel block text-[8px] text-[#eaffea]">{drill.name}</span>
+                    <span className="mt-1 block text-[12px] leading-tight text-[#a9c2ae]">{drill.description}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-[#9fce9f]">Unlimited reps. Press N or tap RESET REP at any time. Pause to return to this menu.</p>
+            </div>
+          )}
 
           {/* 1v1 opponent + side picker */}
           {isDrill && (

@@ -711,7 +711,7 @@ function drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: numb
 }
 
 function drawJoystick(e: GameEngine, ctx: CanvasRenderingContext2D, px: Proj, S: number) {
-  if (!e.joy.active || (e.play !== 'run' && !e.cpuOffense)) return;
+  if (!e.joy.active || (e.play !== 'run' && !e.cpuOffense && !e.cfg.drill)) return;
   const [bx, by] = px(e.joy.bx, e.joy.by);
   ctx.globalAlpha = 0.25;
   ctx.fillStyle = '#eaffea';
@@ -1015,9 +1015,14 @@ function drawHUD(e: GameEngine, ctx: CanvasRenderingContext2D) {
   if (c.drill) {
     const p1Role = e.drillSide === 'wr' ? 'WR' : 'DB';
     const p2Role = e.drillSide === 'wr' ? 'DB' : 'WR';
-    teamChip(ctx, 14, 8, e.twoP ? `P1 ${p1Role}` : `YOU ${p1Role}`, e.drillYou, '#ffd94d', '#1d1405', true);
-    teamChip(ctx, W - 14 - 122, 8, e.twoP ? `P2 ${p2Role}` : `CPU ${p2Role}`, e.drillOpp, e.twoP ? '#b06bff' : '#d64045', '#1d0a0e', e.twoP);
-    text(ctx, `REP ${Math.min(e.rep + 1, c.reps)} / ${c.reps}`, W / 2, 19, 10, '#eaffea');
+    if (c.practice) {
+      teamChip(ctx, 14, 8, e.drillSide === 'wr' ? 'CATCHES' : 'BREAKUPS', e.drillSide === 'wr' ? e.stats.catches : e.stats.breakups, '#ffd94d', '#1d1405', true);
+      teamChip(ctx, W - 14 - 122, 8, 'TARGETS', e.stats.attempts, '#4dd8ff', '#1d0a0e', false);
+    } else {
+      teamChip(ctx, 14, 8, e.twoP ? `P1 ${p1Role}` : `YOU ${p1Role}`, e.drillYou, '#ffd94d', '#1d1405', true);
+      teamChip(ctx, W - 14 - 122, 8, e.twoP ? `P2 ${p2Role}` : `CPU ${p2Role}`, e.drillOpp, e.twoP ? '#b06bff' : '#d64045', '#1d0a0e', e.twoP);
+    }
+    text(ctx, c.practice ? `${e.practiceName()}  REP ${e.rep + 1}` : `REP ${Math.min(e.rep + 1, c.reps)} / ${c.reps}`, W / 2, 19, 10, '#eaffea');
     const hint = e.play === 'air' ? 'BALL IN THE AIR!' : e.play === 'run' ? 'RUN IT / BRING HIM DOWN' : 'ROUTE IS LIVE';
     text(ctx, hint, W / 2, 41, 8, '#aaff3c');
   } else {
@@ -1042,8 +1047,8 @@ function drawHUD(e: GameEngine, ctx: CanvasRenderingContext2D) {
       text(ctx, `DRIVE ${Math.min(e.possIdx + 1, c.drives * 2)}/${c.drives * 2}`, W / 2, 18, 10, '#eaffea');
       text(ctx, e.downAndDist(), W / 2, 40, 10, '#ffd94d');
     } else {
-      text(ctx, 'PRACTICE', W / 2, 18, 10, '#c5ff6b');
-      text(ctx, `TDs ${e.stats.tds}   BEST ${e.stats.longest}`, W / 2, 40, 9, '#ffd94d');
+      text(ctx, `PRACTICE: ${e.practiceName()}`, W / 2, 18, 9, '#c5ff6b');
+      text(ctx, `REP ${e.rep + 1}   CATCHES ${e.stats.catches}   BREAKUPS ${e.stats.breakups}`, W / 2, 40, 8, '#ffd94d');
     }
   }
 
@@ -1174,6 +1179,19 @@ function drawButtons(e: GameEngine, ctx: CanvasRenderingContext2D) {
   const mid = e.vw / 2;
   const base = e.vh;
 
+  if (e.cfg.practice && (e.phase === 'presnap' || e.phase === 'play')) {
+    const reset: UIButton = { id: 'practiceReset', x: 14, y: 115, w: 132, h: 35,
+      label: 'RESET REP', sub: e.isTouch ? undefined : '[N]', color: '#c5ff6b', cb: () => e.resetPractice() };
+    styledButton(ctx, reset, '#123a1e');
+    e.ui.push(reset);
+  }
+  if (e.isTouch && e.cpuOffense && e.phase === 'play' && e.play === 'air' && e.ball.state === 'air') {
+    const swat: UIButton = { id: 'swat', x: e.vw - 142, y: base - 150, w: 120, h: 48,
+      label: 'SWAT', color: '#4dd8ff', cb: () => e.trySwatPass() };
+    styledButton(ctx, swat, '#12303f');
+    e.ui.push(swat);
+  }
+
   if (e.phase === 'kick' && e.kick.kind === 'kickoff' && e.kick.sub === 'choose') {
     const k = e.kick;
     const selected = k.returnToPlayer ? (k.returnLane ?? 0) : Math.sign(k.targetX ?? 0);
@@ -1262,7 +1280,7 @@ function drawButtons(e: GameEngine, ctx: CanvasRenderingContext2D) {
     if (e.twoP) drawActionCard(e, ctx, 1);
     const action = e.actionFor(0);
     if (e.isTouch && action) {
-      const b: UIButton = { id: 'act', x: e.vw - 150, y: base - 108, w: 132, h: 54, label: 'BALL!', color: '#ffd94d', cb: () => e.drillAction(0) };
+      const b: UIButton = { id: 'act', x: e.vw - 150, y: base - 108, w: 132, h: 54, label: action === 'defend' ? (e.play === 'air' ? 'SWAT' : 'TACKLE') : 'BALL!', color: '#ffd94d', cb: () => e.drillAction(0) };
       styledButton(ctx, b, '#3f3312');
       e.ui.push(b);
     }
@@ -1343,8 +1361,8 @@ function drawActionCard(e: GameEngine, ctx: CanvasRenderingContext2D, pad: numbe
       ctx.fillStyle = '#ff9f3c';
       ctx.fillRect(tx, y + 38, bw * (1 - Math.min(1, me.gambleCd / Math.max(0.01, me.gambleCdMax))), 8);
     } else if (can) {
-      text(ctx, 'DIVE TACKLE', tx, y + 28, 9, accent, 'left', false);
-      text(ctx, 'MISS = BIG GAS HIT', tx, y + 42, 6, '#7aa383', 'left', false);
+      text(ctx, e.play === 'air' ? 'SWAT PASS' : 'DIVE TACKLE', tx, y + 28, 9, accent, 'left', false);
+      text(ctx, e.play === 'air' ? 'GET CLOSE TO BALL' : 'MISS = BIG GAS HIT', tx, y + 42, 6, '#7aa383', 'left', false);
     } else {
       text(ctx, 'COVER HIM', tx, y + 30, 8, '#48624f', 'left', false);
     }
@@ -1512,7 +1530,7 @@ function drawHints(e: GameEngine, ctx: CanvasRenderingContext2D) {
   } else if (e.phase === 'play' && e.cpuOffense) {
     hints = ['WASD MOVE', 'Q SWITCH DEFENDER', 'SPACE SWAT (PASS IN AIR)'];
   } else if (e.phase === 'play' && e.cfg.drill) {
-    hints = e.twoP ? ['WASD P1', 'IJKL P2', 'F/P TACKLE'] : ['WASD MOVE', 'F TACKLE', 'R RESET'];
+    hints = e.twoP ? ['WASD P1', 'IJKL P2', 'F/P ACTION'] : ['WASD MOVE', 'F ACTION', e.cfg.practice ? 'N RESET REP' : 'R RESET'];
   } else if (e.phase === 'play' && e.play === 'qb') {
     hints = ['CLICK THROW', '1-6 QUICK PASS', 'WASD MOVE', 'RMB SCRAMBLE'];
   } else if (e.play === 'run') {

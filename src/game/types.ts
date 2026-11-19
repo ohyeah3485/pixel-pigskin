@@ -1,7 +1,8 @@
 export type ModeId = 'arcade' | 'seven7' | 'one1' | 'two2' | 'practice';
 export type DrillSide = 'wr' | 'db';
+export type PracticeDrill = 'scrimmage' | 'running' | 'passing' | 'catching' | 'coverage' | 'defense' | 'redzone';
 export type DrillOpponent = 'ai' | 'local';
-export type ActionKind = 'call_ball' | null;
+export type ActionKind = 'call_ball' | 'defend' | null;
 
 export interface Mods {
   bigHead: boolean;
@@ -78,7 +79,7 @@ export const MODES: Record<ModeId, ModeCfg> = {
   },
   practice: {
     id: 'practice', key: 'practice', name: 'PRACTICE', tag: 'PRAC',
-    desc: 'Unlimited downs vs a soft scout team. Lab your reads and routes. R resets the rep.',
+    desc: 'Choose a drill and train with unlimited reps, no clock, and no pressure.',
     wr: 5, db: 3, dl: 1, canScramble: true,
     clocked: false, halfLen: 0, cpuSim: false,
     conv: 'none', tdPoints: 6, drives: 0, practice: true,
