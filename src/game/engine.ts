@@ -463,7 +463,7 @@ export class GameEngine {
   get camBias() { return 0.28; }
 
   /** Slightly compress the screen-vertical field axis without changing world distances. */
-  get fieldHeightScale() { return 0.9; }
+  get fieldHeightScale() { return 0.85; }
 
   /** downfield yards visible to the left / right of the focus */
   camYMin() { return -ENDZONE_DEPTH - 2 + (this.vw * this.camBias) / this.S; }
